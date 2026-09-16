@@ -42,8 +42,9 @@ ENV/
 *.env
 .env.*
 
-# Output cache & private proxies
-output/
+# Output cache & private proxies (preserve directory via output/.gitignore)
+output/*
+!output/.gitignore
 
 # Local custom automation scripts & private runners (never commit or push)
 local_*.py
