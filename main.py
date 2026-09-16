@@ -580,13 +580,14 @@ def show_health_check_menu(target_file: str = None, timeout: float = 3.5):
         p = res["proxy"]
         disp = p["display"]
         proto = p["protocol"].upper()
+        loc = res.get("location_str") or f"[{res.get('country_code', '??')}] {res.get('country', 'Unknown')}"
         if res["alive"]:
             lat = res["latency_ms"]
             color = Fore.GREEN if lat < 600 else (Fore.YELLOW if lat < 1500 else Fore.MAGENTA)
-            print(f"  [{curr:>2}/{total}] {Fore.GREEN}✓ ALIVE{Style.RESET_ALL}  {Fore.WHITE}[{proto:<5}]{Style.RESET_ALL} {disp:<32} | {color}{lat:>4}ms{Style.RESET_ALL} (IP: {res['egress_ip']})")
+            print(f"  [{curr:>2}/{total}] {Fore.GREEN}✓ ALIVE{Style.RESET_ALL}  {Fore.WHITE}[{proto:<5}]{Style.RESET_ALL} {disp:<30} | {color}{lat:>4}ms{Style.RESET_ALL} | {Fore.CYAN}{loc}{Style.RESET_ALL}")
         else:
             err = res.get("error", "Failed")
-            print(f"  [{curr:>2}/{total}] {Fore.RED}✗ DEAD {Style.RESET_ALL}  {Fore.WHITE}[{proto:<5}]{Style.RESET_ALL} {disp:<32} | {Fore.RED}{err}{Style.RESET_ALL}")
+            print(f"  [{curr:>2}/{total}] {Fore.RED}✗ DEAD {Style.RESET_ALL}  {Fore.WHITE}[{proto:<5}]{Style.RESET_ALL} {disp:<30} | {Fore.RED}{err:<18}{Style.RESET_ALL} | {Fore.LIGHTBLACK_EX}{loc}{Style.RESET_ALL}")
 
     results = check_file_health(
         file_path=selected_file,
@@ -609,6 +610,10 @@ def show_health_check_menu(target_file: str = None, timeout: float = 3.5):
     print(f"  • {'Kondisi Sehat' if CURRENT_LANG == 'ID' else 'Healthy Nodes'}     : {Fore.GREEN}{Style.BRIGHT}{alive_count} aktif ({pct}%){Style.RESET_ALL}")
     print(f"  • {'Kondisi Mati/RTO' if CURRENT_LANG == 'ID' else 'Dead / Timeout'}  : {Fore.RED}{dead_count} mati ({round(100 - pct, 1)}%){Style.RESET_ALL}")
     print(f"  • {'Rata-rata Latency' if CURRENT_LANG == 'ID' else 'Average Latency'} : {Fore.YELLOW}{results['avg_latency_ms']} ms{Style.RESET_ALL}")
+    dist = results.get("country_distribution", {})
+    if dist:
+        dist_str = ", ".join(f"{c} ({cnt})" for c, cnt in list(dist.items())[:5])
+        print(f"  • {'Sebaran Lokasi' if CURRENT_LANG == 'ID' else 'Locations'}        : {Fore.WHITE}{dist_str}{Style.RESET_ALL}")
     print(f"  • {'Durasi Pengujian' if CURRENT_LANG == 'ID' else 'Duration'}        : {Fore.LIGHTBLACK_EX}{results['duration_sec']}s{Style.RESET_ALL}")
     print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
 

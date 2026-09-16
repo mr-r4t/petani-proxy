@@ -36,5 +36,20 @@ class TestHealthChecker(unittest.TestCase):
             self.assertIn("ip", proxies[0])
             self.assertIn("port", proxies[0])
 
+    def test_location_resolution(self):
+        from core.health_checker import resolve_location
+        # 1. Cloudflare loc and colo code
+        geo1 = resolve_location(loc_code="GB", colo_code="LHR")
+        self.assertEqual(geo1["country_code"], "GB")
+        self.assertEqual(geo1["country"], "United Kingdom")
+        self.assertEqual(geo1["city"], "London")
+        self.assertIn("[GB] United Kingdom (London)", geo1["location_str"])
+
+        # 2. Indonesian datacenter
+        geo2 = resolve_location(loc_code="ID", colo_code="CGK")
+        self.assertEqual(geo2["country_code"], "ID")
+        self.assertEqual(geo2["country"], "Indonesia")
+        self.assertEqual(geo2["city"], "Jakarta")
+
 if __name__ == "__main__":
     unittest.main()
