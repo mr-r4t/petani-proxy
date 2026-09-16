@@ -384,9 +384,10 @@ def view_saved_results(output_dir: str = None):
     print(f"  {Fore.GREEN}[1]{Fore.WHITE} 🚀 Nyalakan Gateway 8888 Memakai Stok Ini")
     print(f"  {Fore.GREEN}[2]{Fore.WHITE} 📂 Buka Folder Output di File Explorer")
     print(f"  {Fore.GREEN}[3]{Fore.WHITE} 🧹 Bersihkan / Hapus Stok Lama")
+    print(f"  {Fore.GREEN}[4]{Fore.WHITE} 🩺 Cek Kesehatan Stok Ini (Health Check)")
     print(f"  {Fore.RED}[0 / Enter]{Fore.WHITE} 🔙 Kembali ke Menu Utama")
     print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
-    sub = input(f"{Fore.YELLOW}Pilih aksi [1-3, 0=Kembali]: {Style.RESET_ALL}").strip()
+    sub = input(f"{Fore.YELLOW}Pilih aksi [1-4, 0=Kembali]: {Style.RESET_ALL}").strip()
     if sub == "1":
         print(f"\n{Fore.GREEN}✓ Menyalakan Gateway 8888 dengan {len(proxies)} proxy dari disk... Tekan Ctrl+C untuk stop.{Style.RESET_ALL}\n")
         start_proxy_server(proxies, port=8888, background=False, enable_health_check=True)
@@ -402,6 +403,8 @@ def view_saved_results(output_dir: str = None):
                     except Exception:
                         pass
             print(f"\n{Fore.GREEN}✓ Stok gudang amunisi berhasil dibersihkan!{Style.RESET_ALL}")
+    elif sub == "4":
+        show_health_check_menu(target_file=json_file)
 
 CURRENT_LANG = "ID"
 
@@ -481,6 +484,169 @@ def test_live_masking(port: int = 8888):
             else:
                 print(f"{Fore.RED}❌ Gagal mendapatkan proxy hidup untuk mengisi gateway.{Style.RESET_ALL}")
     print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}\n")
+
+def show_health_check_menu(target_file: str = None, timeout: float = 3.5):
+    """
+    Fitur Cek Kesehatan Hasil Proxy [H]:
+    Menguji file proxy (.txt / .json), mengukur latency, mendeteksi node mati,
+    dan menyediakan opsi simpan file bersih atau langsung nyalakan gateway 8888.
+    """
+    global CURRENT_LANG
+    from core.health_checker import check_file_health, save_healthy_proxies, load_proxies_from_file
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(base_dir, "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    selected_file = target_file
+    if not selected_file:
+        available_files = []
+        for fname in sorted(os.listdir(output_dir)):
+            fpath = os.path.join(output_dir, fname)
+            if os.path.isfile(fpath) and fname.endswith((".txt", ".json")) and not fname.startswith("."):
+                available_files.append((fname, fpath))
+
+        # Prioritize webshare_residential.txt
+        available_files.sort(key=lambda x: (0 if "webshare" in x[0] else 1, x[0]))
+
+        print(f"\n{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+        if CURRENT_LANG == "ID":
+            print(f"{Fore.WHITE}{Style.BRIGHT}🩺  PETANIPROXY HEALTH CHECKER (CEK KESEHATAN AMUNISI){Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLACK_EX}Uji konektivitas & latency riil dari file hasil proxy di disk.{Style.RESET_ALL}\n")
+        else:
+            print(f"{Fore.WHITE}{Style.BRIGHT}🩺  PETANIPROXY HEALTH CHECKER (AMMO PROBE ENGINE){Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLACK_EX}Verify real-time connectivity & latency of proxy lists on disk.{Style.RESET_ALL}\n")
+
+        if not available_files:
+            msg = "⚠️ Tidak ditemukan file proxy di folder output/." if CURRENT_LANG == "ID" else "⚠️ No proxy files found in output/."
+            print(f"{Fore.YELLOW}{msg}{Style.RESET_ALL}")
+            p_custom = "Masukkan path file proxy (.txt / .json): " if CURRENT_LANG == "ID" else "Enter custom proxy file path (.txt / .json): "
+            manual_path = input(f"{Fore.CYAN}{p_custom}{Style.RESET_ALL}").strip(' "\'')
+            if not manual_path or not os.path.exists(manual_path):
+                print(f"{Fore.RED}{'File tidak ditemukan.' if CURRENT_LANG == 'ID' else 'File not found.'}{Style.RESET_ALL}")
+                return
+            selected_file = manual_path
+        else:
+            header_lbl = "PILIH FILE PROXY YANG INGIN DICEK:" if CURRENT_LANG == "ID" else "SELECT PROXY FILE TO PROBE:"
+            print(f"{Fore.WHITE}{header_lbl}{Style.RESET_ALL}")
+            for idx, (fname, fpath) in enumerate(available_files, 1):
+                try:
+                    count = len(load_proxies_from_file(fpath))
+                except Exception:
+                    count = "?"
+                badge = f"{Fore.YELLOW}[RESIDENTIAL] " if "webshare" in fname else ""
+                print(f"  {Fore.GREEN}[{idx}]{Fore.WHITE} {badge}{fname:<26} {Fore.LIGHTBLACK_EX}({count} proxy){Style.RESET_ALL}")
+
+            custom_lbl = "Masukkan path file sendiri / custom" if CURRENT_LANG == "ID" else "Specify custom file path"
+            cancel_lbl = "Kembali ke Menu Utama" if CURRENT_LANG == "ID" else "Back to Main Menu"
+            print(f"  {Fore.CYAN}[C]{Fore.WHITE} 📁 {custom_lbl}")
+            print(f"  {Fore.RED}[0 / Enter]{Fore.WHITE} 🔙 {cancel_lbl}")
+            print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+
+            prompt_f = f"Pilih file [1-{len(available_files)}, C, 0=Kembali, default=1]: " if CURRENT_LANG == "ID" else f"Choose file [1-{len(available_files)}, C, 0=Back, default=1]: "
+            f_choice = input(f"{Fore.YELLOW}{prompt_f}{Style.RESET_ALL}").strip()
+            if f_choice == "0":
+                return
+            elif f_choice.lower() == "c":
+                p_in = "Masukkan path file: " if CURRENT_LANG == "ID" else "Enter file path: "
+                manual_path = input(f"{Fore.CYAN}{p_in}{Style.RESET_ALL}").strip(' "\'')
+                if not manual_path or not os.path.exists(manual_path):
+                    print(f"{Fore.RED}{'File tidak ditemukan!' if CURRENT_LANG == 'ID' else 'File not found!'}{Style.RESET_ALL}")
+                    return
+                selected_file = manual_path
+            elif f_choice.isdigit() and 1 <= int(f_choice) <= len(available_files):
+                selected_file = available_files[int(f_choice) - 1][1]
+            elif f_choice == "":
+                selected_file = available_files[0][1]
+            else:
+                print(f"{Fore.RED}{'Pilihan tidak valid.' if CURRENT_LANG == 'ID' else 'Invalid option.'}{Style.RESET_ALL}")
+                return
+
+    fname_display = os.path.basename(selected_file)
+    print(f"\n{Fore.GREEN}✓ {'Target file pengujian:' if CURRENT_LANG == 'ID' else 'Target file for probe:'} {Fore.WHITE}{fname_display}{Style.RESET_ALL}")
+
+    try:
+        t_prompt = f"Batas timeout per proxy dalam detik [default: {timeout}s]: " if CURRENT_LANG == "ID" else f"Timeout per proxy in seconds [default: {timeout}s]: "
+        t_in = input(f"{Fore.LIGHTBLACK_EX}{t_prompt}{Style.RESET_ALL}").strip()
+        if t_in:
+            timeout = float(t_in)
+    except ValueError:
+        pass
+
+    start_msg = f"🚀 MEMULAI HEALTH PROBE (Timeout: {timeout}s)..." if CURRENT_LANG == "ID" else f"🚀 STARTING HEALTH PROBE (Timeout: {timeout}s)..."
+    print(f"\n{Fore.CYAN}{start_msg}{Style.RESET_ALL}\n")
+
+    def on_probe_progress(curr: int, total: int, res: dict):
+        p = res["proxy"]
+        disp = p["display"]
+        proto = p["protocol"].upper()
+        if res["alive"]:
+            lat = res["latency_ms"]
+            color = Fore.GREEN if lat < 600 else (Fore.YELLOW if lat < 1500 else Fore.MAGENTA)
+            print(f"  [{curr:>2}/{total}] {Fore.GREEN}✓ ALIVE{Style.RESET_ALL}  {Fore.WHITE}[{proto:<5}]{Style.RESET_ALL} {disp:<32} | {color}{lat:>4}ms{Style.RESET_ALL} (IP: {res['egress_ip']})")
+        else:
+            err = res.get("error", "Failed")
+            print(f"  [{curr:>2}/{total}] {Fore.RED}✗ DEAD {Style.RESET_ALL}  {Fore.WHITE}[{proto:<5}]{Style.RESET_ALL} {disp:<32} | {Fore.RED}{err}{Style.RESET_ALL}")
+
+    results = check_file_health(
+        file_path=selected_file,
+        timeout=timeout,
+        max_workers=35,
+        on_progress=on_probe_progress
+    )
+
+    total = results["total"]
+    alive = results["alive"]
+    dead = results["dead"]
+    alive_count = len(alive)
+    dead_count = len(dead)
+    pct = round((alive_count / total * 100), 1) if total > 0 else 0
+
+    print(f"\n{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+    sum_title = f"📊 RINGKASAN HASIL HEALTH CHECK ({fname_display}):" if CURRENT_LANG == "ID" else f"📊 HEALTH CHECK SUMMARY ({fname_display}):"
+    print(f"{Fore.WHITE}{Style.BRIGHT}{sum_title}{Style.RESET_ALL}")
+    print(f"  • {'Total Diuji' if CURRENT_LANG == 'ID' else 'Total Tested'}       : {Fore.WHITE}{total} node{Style.RESET_ALL}")
+    print(f"  • {'Kondisi Sehat' if CURRENT_LANG == 'ID' else 'Healthy Nodes'}     : {Fore.GREEN}{Style.BRIGHT}{alive_count} aktif ({pct}%){Style.RESET_ALL}")
+    print(f"  • {'Kondisi Mati/RTO' if CURRENT_LANG == 'ID' else 'Dead / Timeout'}  : {Fore.RED}{dead_count} mati ({round(100 - pct, 1)}%){Style.RESET_ALL}")
+    print(f"  • {'Rata-rata Latency' if CURRENT_LANG == 'ID' else 'Average Latency'} : {Fore.YELLOW}{results['avg_latency_ms']} ms{Style.RESET_ALL}")
+    print(f"  • {'Durasi Pengujian' if CURRENT_LANG == 'ID' else 'Duration'}        : {Fore.LIGHTBLACK_EX}{results['duration_sec']}s{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+
+    if alive_count == 0:
+        err_zero = "⚠️ Seluruh proxy di file ini tidak merespons (mati)." if CURRENT_LANG == "ID" else "⚠️ All proxies in this file are unreachable (dead)."
+        print(f"{Fore.RED}{err_zero}{Style.RESET_ALL}\n")
+        return
+
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}{'PILIH AKSI TINDAK LANJUT:' if CURRENT_LANG == 'ID' else 'CHOOSE NEXT ACTION:'}{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}[1]{Fore.WHITE} 💾 {'Simpan File Bersih (Hanya Simpan' if CURRENT_LANG == 'ID' else 'Save Clean File (Save only'} {alive_count} {'IP Hidup)' if CURRENT_LANG == 'ID' else 'Alive IPs)'}")
+    print(f"  {Fore.GREEN}[2]{Fore.WHITE} 🚀 {'Nyalakan Local Gateway 8888 Langsung dengan' if CURRENT_LANG == 'ID' else 'Launch Gateway 8888 with'} {alive_count} {'IP Ini' if CURRENT_LANG == 'ID' else 'Alive IPs'}")
+    print(f"  {Fore.GREEN}[3]{Fore.WHITE} 🔄 {'Sync IP Hidup ke Database BansosRouter (9Router)' if CURRENT_LANG == 'ID' else 'Sync Alive IPs to BansosRouter DB'}")
+    print(f"  {Fore.RED}[0 / Enter]{Fore.WHITE} 🔙 {'Kembali ke Menu Utama' if CURRENT_LANG == 'ID' else 'Return to Main Menu'}")
+    print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+
+    p_act = "Pilih aksi [1-3, 0=Kembali]: " if CURRENT_LANG == "ID" else "Select action [1-3, 0=Back]: "
+    act = input(f"{Fore.YELLOW}{p_act}{Style.RESET_ALL}").strip()
+    if act == "1":
+        ov_prompt = f"Timpa file asli '{fname_display}'? [Y = Timpa / n = Simpan sebagai file baru _healthy]: " if CURRENT_LANG == "ID" else f"Overwrite original '{fname_display}'? [Y = Overwrite / n = New _healthy file]: "
+        ov = input(f"{Fore.YELLOW}{ov_prompt}{Style.RESET_ALL}").strip().lower()
+        overwrite = ov in ("", "y", "yes")
+        saved_file = save_healthy_proxies(selected_file, alive, overwrite=overwrite)
+        ok_msg = f"✓ File proxy sehat berhasil disimpan ke: {saved_file}" if CURRENT_LANG == "ID" else f"✓ Healthy proxies successfully saved to: {saved_file}"
+        print(f"\n{Fore.GREEN}{ok_msg}{Style.RESET_ALL}\n")
+    elif act == "2":
+        live_for_server = [r["proxy"] for r in alive]
+        gw_msg = f"✓ Menyalakan Gateway 8888 dengan {len(live_for_server)} proxy sehat... Tekan Ctrl+C untuk stop." if CURRENT_LANG == "ID" else f"✓ Launching Gateway 8888 with {len(live_for_server)} healthy proxies... Press Ctrl+C to stop."
+        print(f"\n{Fore.GREEN}{gw_msg}{Style.RESET_ALL}\n")
+        start_proxy_server(live_for_server, port=8888, background=False, enable_health_check=True)
+    elif act == "3":
+        router_db = find_9router_db()
+        if router_db:
+            from core.exporter import sync_to_9router_sqlite
+            live_for_server = [r["proxy"] for r in alive]
+            cnt = sync_to_9router_sqlite(live_for_server, router_db)
+            print(f"\n{Fore.GREEN}✓ Berhasil menyinkronkan {cnt} proxy hidup ke {router_db}!{Style.RESET_ALL}\n")
+        else:
+            print(f"\n{Fore.RED}❌ Database 9Router (data.sqlite) tidak ditemukan.{Style.RESET_ALL}\n")
 
 
 
@@ -872,6 +1038,7 @@ def show_interactive_menu():
   {Fore.MAGENTA}BUNGKUS HASIL PANEN & TES IDENTITAS
   {Fore.CYAN}[E]{Fore.WHITE} 📥 Bungkus File Mentah    {Fore.GREEN}[SIAP EKSPOR]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}Sedot TXT, JSON, CSV buat bot lu
   {Fore.CYAN}[T]{Fore.WHITE} 🧪 Uji Kesaktian Topeng   {st['gateway']} {Fore.LIGHTBLACK_EX}Tes live: Adu IP asli lu vs IP Gateway (Anti-Bocor)
+  {Fore.CYAN}[H]{Fore.WHITE} 🩺 Cek Kesehatan Hasil    {Fore.GREEN}[HEALTH CHECK]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}Uji ulang stok proxy di output (Webshare/TXT/JSON)
 
   {Fore.MAGENTA}PEMBARUAN & PUSAT PENGATURAN
   {Fore.YELLOW}{Style.BRIGHT}[K]{Fore.WHITE}{Style.BRIGHT} ⚙️ Pengaturan Cepat       {Fore.GREEN}[PASTE & GO]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}Setup API CapSolver & Domain Email tanpa ngoding
@@ -883,7 +1050,7 @@ def show_interactive_menu():
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   {Fore.LIGHTBLACK_EX}Maintainer: {Fore.YELLOW}@itzluthfi{Fore.LIGHTBLACK_EX}          Repository: {Fore.WHITE}github.com/itzluthfi
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}"""
-            prompt_str = f"{Fore.YELLOW}Pilih Opsi [W, C, F, G, 1-3, E, T, K, U, M, S, L, 0] (Saran: W atau C untuk speed monster): {Style.RESET_ALL}"
+            prompt_str = f"{Fore.YELLOW}Pilih Opsi [W, C, F, G, 1-3, E, T, H, K, U, M, S, L, 0] (Saran: W atau C untuk speed monster): {Style.RESET_ALL}"
         else:
             u_line = f"  {Fore.YELLOW}{Style.BRIGHT}[U]{Fore.WHITE}{Style.BRIGHT} 🚀 New Update Available!  {Fore.GREEN}v{cached_update_info.get('remote_version')} [SELECT TO UPDATE]\n" if (cached_update_info and cached_update_info.get("has_update")) else f"  {Fore.GREEN}[U]{Fore.WHITE} 🔄 Check & Update Version {Fore.GREEN}[v{local_ver} LATEST]{Style.RESET_ALL}\n"
             menu_box = f"""{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -917,6 +1084,7 @@ def show_interactive_menu():
   {Fore.MAGENTA}DUMP RAW AMMO & STEALTH TEST
   {Fore.CYAN}[E]{Fore.WHITE} 📥 Dump Raw Ammo Files    {Fore.GREEN}[READY TO DUMP]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}Export TXT, JSON, CSV for bots
   {Fore.CYAN}[T]{Fore.WHITE} 🧪 Stealth Mask Check     {st['gateway']} {Fore.LIGHTBLACK_EX}Live test: Real IP vs Gateway IP (Zero Leak)
+  {Fore.CYAN}[H]{Fore.WHITE} 🩺 Ammo Health Checker     {Fore.GREEN}[HEALTH CHECK]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}Re-probe proxies in output/ (Webshare/TXT/JSON)
  
   {Fore.MAGENTA}UPDATES & QUICK SETTINGS
   {Fore.YELLOW}{Style.BRIGHT}[K]{Fore.WHITE}{Style.BRIGHT} ⚙️ Quick Settings Lab      {Fore.GREEN}[PASTE & GO]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}Setup CapSolver Key & Custom Domain with zero coding
@@ -928,7 +1096,7 @@ def show_interactive_menu():
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   {Fore.LIGHTBLACK_EX}Maintainer: {Fore.YELLOW}@itzluthfi{Fore.LIGHTBLACK_EX}          Repository: {Fore.WHITE}github.com/itzluthfi
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}"""
-            prompt_str = f"{Fore.YELLOW}Select Option [W, C, F, G, 1-3, E, T, K, U, M, S, L, 0] (Pro-tip: Press W or C for godmode): {Style.RESET_ALL}"
+            prompt_str = f"{Fore.YELLOW}Select Option [W, C, F, G, 1-3, E, T, H, K, U, M, S, L, 0] (Pro-tip: Press W or C for godmode): {Style.RESET_ALL}"
 
 
 
@@ -976,6 +1144,9 @@ def show_interactive_menu():
 
         if choice.lower() == "t":
             test_live_masking(port=8888)
+        elif choice.lower() == "h":
+            show_health_check_menu()
+            continue
         elif choice.lower() == "e":
             q_str = f"{Fore.CYAN}{'Target jumlah proxy hidup yang mau diekspor [default: 20]: ' if CURRENT_LANG == 'ID' else 'Target alive proxies to export [default: 20]: '}{Style.RESET_ALL}"
             t_input = input(q_str).strip()
@@ -1247,6 +1418,7 @@ def main():
     parser.add_argument("--daemon-gateway", "-G", action="store_true", help="Run 24/7 resilient local gateway on port 8888 with auto-healer")
     parser.add_argument("--webshare", "-W", type=int, nargs="?", const=1, default=None, help="Trigger Webshare Residential Hunter for N accounts (default: 1)")
     parser.add_argument("--headless", action="store_true", help="Run Webshare Hunter in headless mode")
+    parser.add_argument("--health-check", "-H", nargs="?", const="auto", default=None, help="Check health of saved proxy file (.txt or .json)")
     parser.add_argument("--update", action="store_true", help="Perform 1-click update via git pull and exit")
     parser.add_argument("--check-update", action="store_true", help="Check for available updates on GitHub and display patch notes")
     parser.add_argument("--install-deps", action="store_true", help="Auto-install all dependencies from requirements.txt")
@@ -1287,6 +1459,11 @@ def main():
     router_db = args.sync_9router
     if router_db == "auto" or router_db is None:
         router_db = find_9router_db()
+
+    if args.health_check is not None:
+        target_f = None if args.health_check == "auto" else args.health_check
+        show_health_check_menu(target_file=target_f, timeout=args.timeout)
+        return
 
     if args.warp:
         from core.warp_generator import generate_and_save_warp

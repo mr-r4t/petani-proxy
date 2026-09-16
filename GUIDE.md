@@ -259,6 +259,7 @@ print(f"Ada {len(proxy_list)} proxy siap pakai!")
 | `python main.py --target-url https://google.com` | Validasi proxy langsung ke target web |
 | `python main.py --serve 8888 --target 20` | Jalankan Rotating Forward Proxy & REST API di port 8888 |
 | `python main.py --sync-9router auto` | Sinkronisasi proxy otomatis ke 9Router SQLite |
+| `python main.py --health-check` | Uji kesehatan file proxy di folder output (Webshare/TXT/JSON) |
 | `python main.py --check-update` | Cek info rilis, versi terbaru & patch notes |
 | `python main.py --update` | 1-Klik auto-update repository ke versi terbaru |
 

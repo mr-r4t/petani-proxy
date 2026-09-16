@@ -11,6 +11,7 @@ import time
 import socket
 import select
 import random
+import base64
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import List, Dict, Any, Optional
@@ -176,8 +177,14 @@ class RotatingProxyRequestHandler(BaseHTTPRequestHandler):
             try:
                 upstream_sock = socket.create_connection((u_ip, u_port), timeout=4.0)
 
-                # Send CONNECT command to upstream proxy
-                connect_req = f"CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n\r\n"
+                # Send CONNECT command to upstream proxy with auth if present
+                auth_hdr = ""
+                if upstream_proxy.get("username") and upstream_proxy.get("password"):
+                    creds = f"{upstream_proxy['username']}:{upstream_proxy['password']}".encode("utf-8")
+                    b64 = base64.b64encode(creds).decode("ascii")
+                    auth_hdr = f"Proxy-Authorization: Basic {b64}\r\n"
+
+                connect_req = f"CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n{auth_hdr}\r\n"
                 upstream_sock.sendall(connect_req.encode("utf-8"))
 
                 # Read upstream response
@@ -217,7 +224,6 @@ class RotatingProxyRequestHandler(BaseHTTPRequestHandler):
 
         req_line = f"{self.command} {self.path} {self.request_version}\r\n"
         headers_str = "".join([f"{k}: {v}\r\n" for k, v in self.headers.items()])
-        full_req = f"{req_line}{headers_str}\r\n".encode("utf-8") + body
 
         for attempt in range(max_retries):
             upstream_proxy = self.pool_manager.get_next()
@@ -226,6 +232,14 @@ class RotatingProxyRequestHandler(BaseHTTPRequestHandler):
 
             u_ip = upstream_proxy["ip"]
             u_port = int(upstream_proxy["port"])
+
+            auth_hdr = ""
+            if upstream_proxy.get("username") and upstream_proxy.get("password"):
+                creds = f"{upstream_proxy['username']}:{upstream_proxy['password']}".encode("utf-8")
+                b64 = base64.b64encode(creds).decode("ascii")
+                auth_hdr = f"Proxy-Authorization: Basic {b64}\r\n"
+
+            full_req = f"{req_line}{headers_str}{auth_hdr}\r\n".encode("utf-8") + body
 
             try:
                 upstream_sock = socket.create_connection((u_ip, u_port), timeout=4.0)
