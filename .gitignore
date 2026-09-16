@@ -37,8 +37,13 @@ ENV/
 *.swp
 *.swo
 
-# Output cache (optional: comment out if you want to commit verified proxies to Git)
-# output/
+# Environment variables & secrets
+.env
+*.env
+.env.*
+
+# Output cache & private proxies
+output/
 
 # Local custom automation scripts & private runners (never commit or push)
 local_*.py
