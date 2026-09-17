@@ -29,12 +29,18 @@ class TestHealthChecker(unittest.TestCase):
         self.assertEqual(p3["password"], "secret")
 
     def test_load_file(self):
-        sample_path = "output/webshare_residential.txt"
-        if os.path.exists(sample_path):
-            proxies = load_proxies_from_file(sample_path)
-            self.assertGreater(len(proxies), 0)
-            self.assertIn("ip", proxies[0])
-            self.assertIn("port", proxies[0])
+        import tempfile
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            tf.write("http://usr:pwd@1.2.3.4:8080\n")
+            tf_name = tf.name
+        try:
+            proxies = load_proxies_from_file(tf_name)
+            self.assertEqual(len(proxies), 1)
+            self.assertEqual(proxies[0]["ip"], "1.2.3.4")
+            self.assertEqual(proxies[0]["port"], 8080)
+        finally:
+            if os.path.exists(tf_name):
+                os.remove(tf_name)
 
     def test_location_resolution(self):
         from core.health_checker import resolve_location

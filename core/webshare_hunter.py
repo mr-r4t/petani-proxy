@@ -26,6 +26,7 @@ import speech_recognition as sr
 from pydub import AudioSegment
 from DrissionPage import Chromium, ChromiumOptions
 from colorama import Fore, Style
+from core.cf_mail import CloudflareMailClient, CloudflareMailError
 
 def find_default_db():
     current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -418,15 +419,17 @@ def get_webshare_email_domain() -> str:
     """
     Mengambil domain email untuk registrasi Webshare.
     Prioritas:
-    1. config/settings.json -> custom_email_domain
-    2. Environment variable WEBSHARE_EMAIL_DOMAIN / WEBSHARE_DOMAIN
+    1. config/settings.json -> cf_domains / custom_email_domain
+    2. Environment variable CF_DOMAINS / WEBSHARE_EMAIL_DOMAIN / WEBSHARE_DOMAIN
     3. config.json / local_config.json
     4. Fallback default pool terverifikasi (Zero-Config untuk pemula)
     """
     # 1. Environment variable
-    env_dom = os.environ.get("WEBSHARE_EMAIL_DOMAIN") or os.environ.get("WEBSHARE_DOMAIN")
+    env_dom = os.environ.get("CF_DOMAINS") or os.environ.get("WEBSHARE_EMAIL_DOMAIN") or os.environ.get("WEBSHARE_DOMAIN")
     if env_dom and env_dom.strip():
-        return env_dom.strip().lstrip("@")
+        domains = [d.strip().lstrip("@") for d in env_dom.split(",") if d.strip()]
+        if domains:
+            return random.choice(domains)
 
     # 2. Config files
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -440,9 +443,11 @@ def get_webshare_email_domain() -> str:
             try:
                 with open(cpath, "r", encoding="utf-8") as f:
                     c = json.load(f)
-                    dom = c.get("custom_email_domain") or c.get("webshare_email_domain") or c.get("email_domain")
+                    dom = c.get("cf_domains") or c.get("custom_email_domain") or c.get("webshare_email_domain") or c.get("email_domain")
                     if dom and dom.strip():
-                        return dom.strip().lstrip("@")
+                        domains = [d.strip().lstrip("@") for d in dom.split(",") if d.strip()]
+                        if domains:
+                            return random.choice(domains)
             except Exception:
                 pass
 
@@ -455,9 +460,18 @@ def get_webshare_email_domain() -> str:
     return random.choice(fallback_pool)
 
 def hunt_single_auto(index, total, headless=False):
-    random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    domain = get_webshare_email_domain()
-    email = f'ws{random_str}@{domain}'
+    cf_client = CloudflareMailClient.from_config()
+    is_cf_active = cf_client.is_configured()
+
+    if is_cf_active:
+        email, domain = cf_client.create_mailbox()
+        email_tag = f"{Fore.GREEN}[Cloudflare Email Routing]{Style.RESET_ALL}"
+    else:
+        random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        domain = get_webshare_email_domain()
+        email = f'ws{random_str}@{domain}'
+        email_tag = f"{Fore.YELLOW}[Direct Pool / 0-Modal]{Style.RESET_ALL}"
+
     special = random.choice('!@#$%')
     rand_mid = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
     password = f'Passw0rd{special}{rand_mid}@#'
@@ -465,7 +479,7 @@ def hunt_single_auto(index, total, headless=False):
     print('\n' + '='*60)
     print(f'     WEBSHARE AUTO-HUNTER — AKUN [{index}/{total}]' + (' [HEADLESS]' if headless else ''))
     print('='*60)
-    print(f'[*] Email yang disiapkan   : {email}')
+    print(f'[*] Email yang disiapkan   : {email} {email_tag}')
     print(f'[*] Password yang disiapkan: {password}')
 
 
@@ -575,6 +589,44 @@ def hunt_single_auto(index, total, headless=False):
             return []
 
         # ============================================================
+        # 3.5. TAHAP VERIFIKASI EMAIL VIA CLOUDFLARE (SEBELUM SEDOT PROXY)
+        # ============================================================
+        if is_cf_active:
+            print(f"\n{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}{Style.BRIGHT}📧 MENUNGGU EMAIL VERIFIKASI CLOUDFLARE (SEBELUM SEDOT PROXY)...{Style.RESET_ALL}")
+            print(f"  • Alamat Email: {Fore.WHITE}{email}{Style.RESET_ALL}")
+            print(f"  • Worker URL  : {Fore.WHITE}{cf_client.worker_url}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+            try:
+                verif_res = cf_client.wait_for_verification(
+                    address=email,
+                    timeout=90,
+                    poll_interval=4,
+                    log=lambda msg: print(f"  {Fore.LIGHTBLACK_EX}{msg}{Style.RESET_ALL}")
+                )
+                if verif_res.get("type") == "link":
+                    act_link = verif_res["value"]
+                    print(f"\n  {Fore.GREEN}✓ Tautan aktivasi Webshare berhasil ditangkap!{Style.RESET_ALL}")
+                    print(f"  {Fore.CYAN}👉 Membuka tautan aktivasi di Chromium: {act_link}{Style.RESET_ALL}")
+                    page.get(act_link)
+                    time.sleep(4)
+                    print(f"  {Fore.GREEN}✅ Email berhasil diverifikasi resmi via Cloudflare! Status akun valid.{Style.RESET_ALL}\n")
+                elif verif_res.get("type") == "code":
+                    code_val = verif_res["value"]
+                    print(f"\n  {Fore.GREEN}✓ Kode OTP verifikasi berhasil ditangkap: {code_val}{Style.RESET_ALL}")
+                    otp_input = page.ele('@name=code') or page.ele('@type=text')
+                    if otp_input:
+                        otp_input.input(code_val)
+                        time.sleep(1)
+            except Exception as e:
+                print(f"  {Fore.YELLOW}⚠️ Catatan Verifikasi: {e}. Melanjutkan ke dashboard...{Style.RESET_ALL}")
+
+        # Pastikan browser berada di Dashboard / Proxy List
+        if 'proxy/list' not in (page.url or '') and 'dashboard.webshare.io' not in (page.url or ''):
+            page.get('https://dashboard.webshare.io/proxy/list')
+            time.sleep(3)
+
+        # ============================================================
         # 4. ACTIVE POLLING & SMART DASHBOARD / PROXY LIST HARVESTER
         # ============================================================
         print('[*] Masuk ke mode Smart Polling di Dashboard/Proxy List...')
@@ -680,11 +732,15 @@ def run_webshare_hunter(total: int = 1, headless: bool = False, sync_9router_db:
     output_webshare_txt = os.path.join(out_dir, "webshare_residential.txt")
     output_elite_txt = os.path.join(out_dir, "live_elite.txt")
 
+    cf_checker = CloudflareMailClient.from_config()
+    cf_status_str = f"{Fore.GREEN}[Cloudflare Worker Aktif ✓]{Style.RESET_ALL}" if cf_checker.is_configured() else f"{Fore.LIGHTBLACK_EX}[Off / Direct Pool]{Style.RESET_ALL}"
+
     mode_str = f"{Fore.YELLOW}[Mode: Background/Headless]{Style.RESET_ALL}" if headless else f"{Fore.GREEN}[Mode: Jendela Tampak]{Style.RESET_ALL}"
     print(f"\n{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
     print(f"{Fore.GREEN}{Style.BRIGHT}🌾 PETANIPROXY x WEBSHARE RESIDENTIAL HUNTER (AUTO-SOLVER){Style.RESET_ALL}")
     print(f"  • Target Akun       : {Fore.YELLOW}{total}{Style.RESET_ALL} Akun (Potensi {total * 10} Residential IP)")
     print(f"  • Mode Tampilan     : {mode_str}")
+    print(f"  • Verifikasi Email  : {cf_status_str}")
     print(f"  • BansosRouter SQLite: {Fore.WHITE}{db_path or 'Tidak Terdeteksi (Skip)'}{Style.RESET_ALL}")
     print(f"  • Grok Farm Proxies : {Fore.WHITE}{grok_txt or 'Tidak Terdeteksi (Skip)'}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")

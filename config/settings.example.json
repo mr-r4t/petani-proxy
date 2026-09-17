@@ -1,8 +1,14 @@
 {
+  "cf_domains": "",
+  "cf_worker_url": "",
+  "cf_worker_secret": "",
   "custom_email_domain": "",
   "capsolver_api_key": "",
   "_panduan": {
-    "custom_email_domain": "Opsional: Masukkan domain pribadi Anda (misal: domainku.com) jika menggunakan Cloudflare Email Routing Catch-all. Kosongkan jika ingin pakai default otomatis.",
-    "capsolver_api_key": "Opsional: Masukkan API key CapSolver jika ingin Webshare Hunter berjalan 100% di background (headless tanpa muncul jendela). Kosongkan untuk pakai AI Audio Captcha Solver gratisan bawaan."
+    "cf_domains": "Domain pribadi Anda untuk Cloudflare Email Routing Catch-all (contoh: domainku.com,domain2.com).",
+    "cf_worker_url": "URL Cloudflare Worker Inbox (contoh: https://petani-proxy-inbox.username.workers.dev).",
+    "cf_worker_secret": "Shared Secret header X-Worker-Secret untuk otentikasi worker.",
+    "custom_email_domain": "Alias untuk cf_domains jika hanya memakai 1 domain.",
+    "capsolver_api_key": "Opsional: API key CapSolver untuk mode headless tanpa jendela browser."
   }
 }

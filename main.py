@@ -661,7 +661,9 @@ def show_settings_menu():
     while True:
         cfg = load_settings()
         cs_key = cfg.get("capsolver_api_key", "").strip()
-        custom_dom = cfg.get("custom_email_domain", "").strip()
+        custom_dom = cfg.get("cf_domains", "").strip() or cfg.get("custom_email_domain", "").strip()
+        cf_url = cfg.get("cf_worker_url", "").strip()
+        cf_sec = cfg.get("cf_worker_secret", "").strip()
         custom_db = cfg.get("9router_db_path", "").strip()
         
         from core.webshare_hunter import check_capsolver_balance
@@ -674,7 +676,15 @@ def show_settings_menu():
         else:
             cs_status = f"{Fore.CYAN}Belum Diisi (Mode AI Audio Gratisan Aktif){Style.RESET_ALL}"
 
-        dom_status = f"{Fore.GREEN}@{custom_dom}{Style.RESET_ALL}" if custom_dom else f"{Fore.CYAN}Otomatis / Fallback Pool (Bebas Domain Pribadi){Style.RESET_ALL}"
+        from core.cf_mail import CloudflareMailClient
+        cf_cli = CloudflareMailClient(domains=custom_dom, worker_url=cf_url, worker_secret=cf_sec)
+        if cf_cli.is_configured():
+            cf_status = f"{Fore.GREEN}Aktif ✓ Auto Verifikasi Webshare ({custom_dom}){Style.RESET_ALL}"
+        elif custom_dom:
+            cf_status = f"{Fore.YELLOW}Domain: @{custom_dom} (Worker URL Belum Diisi){Style.RESET_ALL}"
+        else:
+            cf_status = f"{Fore.CYAN}Otomatis / Fallback Pool (0-Modal Tanpa Verifikasi){Style.RESET_ALL}"
+
         db_detected = find_9router_db()
         db_status = f"{Fore.GREEN}{custom_db or db_detected}{Style.RESET_ALL}" if (custom_db or db_detected) else f"{Fore.LIGHTBLACK_EX}Tidak Terdeteksi (Mode Standalone){Style.RESET_ALL}"
 
@@ -689,10 +699,10 @@ def show_settings_menu():
       {Fore.LIGHTBLACK_EX}Fungsi : Biar Webshare Hunter bisa jalan 100% di background (Headless).
                {Fore.YELLOW}*CATATAN: Tidak wajib! Versi gratisan audio bawaan tetap aktif tanpa saldo.{Fore.LIGHTBLACK_EX}
 
-  {Fore.GREEN}[2]{Fore.WHITE} 📧 Setup Custom Domain Email Webshare
-      {Fore.LIGHTBLACK_EX}Status : {dom_status}
-      {Fore.LIGHTBLACK_EX}Fungsi : Masukkan domain kamu (Cloudflare Email Routing) agar notifikasi akun
-               masuk ke Gmail pribadi. Kosongkan jika ingin mode 0-modal otomatis.
+  {Fore.GREEN}[2]{Fore.WHITE} 📧 Setup Cloudflare Email Worker & Domain (Auto Verifikasi Webshare)
+      {Fore.LIGHTBLACK_EX}Status : {cf_status}
+      {Fore.LIGHTBLACK_EX}Fungsi : Verifikasi otomatis email Webshare via Cloudflare Email Routing + Worker
+               (sama persis seperti arsitektur github-farm). Bebas banned & akun lebih awet!
 
   {Fore.GREEN}[3]{Fore.WHITE} 🔌 Setup Lokasi Database 9Router
       {Fore.LIGHTBLACK_EX}Status : {db_status}
@@ -723,16 +733,38 @@ def show_settings_menu():
                 print(f"\n{Fore.GREEN}✅ API Key dikosongkan. PetaniProxy kembali ke mode AI Audio Solver 100% gratisan bawaan.{Style.RESET_ALL}")
             input(f"\n{Fore.LIGHTBLACK_EX}[Tekan Enter untuk lanjut...]{Style.RESET_ALL}")
         elif choice == "2":
-            print(f"\n{Fore.CYAN}📧 PENGATURAN CUSTOM DOMAIN WEBSHARE{Style.RESET_ALL}")
-            print(f"{Fore.LIGHTBLACK_EX}Contoh: mydomain.com (pastikan sudah disetup Catch-all di Cloudflare Email Routing).{Style.RESET_ALL}")
-            print(f"{Fore.LIGHTBLACK_EX}Tekan Enter tanpa ketik apa pun untuk kembali ke domain pool otomatis (0-Modal).{Style.RESET_ALL}")
-            new_dom = input(f"{Fore.YELLOW}Masukkan domain email Anda: {Style.RESET_ALL}").strip().lstrip("@")
-            cfg["custom_email_domain"] = new_dom
-            save_settings(cfg)
+            print(f"\n{Fore.CYAN}📧 PENGATURAN CLOUDFLARE EMAIL ROUTING & WORKER{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLACK_EX}Pola verifikasi otomatis mengadopsi repositori github-farm.{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLACK_EX}Tekan Enter tanpa isi jika ingin mempertahankan nilai saat ini / mengosongkan.{Style.RESET_ALL}\n")
+            
+            curr_dom = cfg.get("cf_domains") or cfg.get("custom_email_domain") or ""
+            curr_url = cfg.get("cf_worker_url") or ""
+            curr_sec = cfg.get("cf_worker_secret") or ""
+
+            new_dom = input(f"{Fore.YELLOW}1. Domain Email (contoh: domainku.com) [Saat ini: {curr_dom or 'Kosong'}]: {Style.RESET_ALL}").strip().lstrip("@")
             if new_dom:
-                print(f"\n{Fore.GREEN}✅ Domain disimpan: @{new_dom}. Registrasi Webshare berikutnya akan memakai domain ini!{Style.RESET_ALL}")
+                cfg["cf_domains"] = new_dom
+                cfg["custom_email_domain"] = new_dom
+
+            new_url = input(f"{Fore.YELLOW}2. URL Cloudflare Worker /inbox [Saat ini: {curr_url or 'Kosong'}]: {Style.RESET_ALL}").strip()
+            if new_url:
+                cfg["cf_worker_url"] = new_url
+
+            new_sec = input(f"{Fore.YELLOW}3. Cloudflare Worker Secret (X-Worker-Secret) [Saat ini: {'***' if curr_sec else 'Kosong'}]: {Style.RESET_ALL}").strip()
+            if new_sec:
+                cfg["cf_worker_secret"] = new_sec
+
+            save_settings(cfg)
+
+            from core.cf_mail import CloudflareMailClient
+            test_cli = CloudflareMailClient.from_config()
+            if test_cli.is_configured():
+                print(f"\n{Fore.GREEN}✅ Cloudflare Email Worker BERHASIL DIKONFIGURASI!{Style.RESET_ALL}")
+                print(f"   • Domain: {test_cli.domains}")
+                print(f"   • Worker URL: {test_cli.worker_url}")
+                print(f"   • Auto-Verifikasi Webshare: {Fore.GREEN}AKTIF ✓{Style.RESET_ALL}")
             else:
-                print(f"\n{Fore.GREEN}✅ Menggunakan domain pool otomatis bawaan PetaniProxy (0-Modal).{Style.RESET_ALL}")
+                print(f"\n{Fore.YELLOW}ℹ️ Pengaturan disimpan. Cloudflare Worker membutuhkan Domain & URL Worker untuk aktif.{Style.RESET_ALL}")
             input(f"\n{Fore.LIGHTBLACK_EX}[Tekan Enter untuk lanjut...]{Style.RESET_ALL}")
         elif choice == "3":
             print(f"\n{Fore.CYAN}🔌 PENGATURAN DATABASE 9ROUTER{Style.RESET_ALL}")
@@ -917,12 +949,28 @@ def get_features_readiness(lang: str = "ID") -> dict:
         score += 20
 
 
+    # 3.5. Cloudflare Email Worker
+    from core.cf_mail import CloudflareMailClient
+    cf_cli = CloudflareMailClient.from_config()
+    if cf_cli.is_configured():
+        status["cf_mail"] = f"{Fore.GREEN}[AKTIF ✓]{Style.RESET_ALL}"
+        status["cf_desc"] = f"Auto Verifikasi ({cf_cli.domains[0]})" if lang == "ID" else f"Auto Verify ({cf_cli.domains[0]})"
+        score += 15
+    elif cf_cli.domains:
+        status["cf_mail"] = f"{Fore.YELLOW}[DOMAIN Sedia]{Style.RESET_ALL}"
+        status["cf_desc"] = f"Domain @{cf_cli.domains[0]} (Worker Off)" if lang == "ID" else f"Domain @{cf_cli.domains[0]} (No Worker)"
+        score += 5
+    else:
+        status["cf_mail"] = f"{Fore.LIGHTBLACK_EX}[0-MODAL / OFF]{Style.RESET_ALL}"
+        status["cf_desc"] = "Tanpa Verifikasi / Default Pool" if lang == "ID" else "No Verification / Default Pool"
+        score += 5
+
     # 4. 9Router DB sync
     db_path = find_9router_db()
     if db_path:
         status["sync"] = f"{Fore.GREEN}[9ROUTER LINKED]{Style.RESET_ALL}"
         status["db_desc"] = f"Terhubung ({os.path.basename(db_path)})" if lang == "ID" else f"Connected ({os.path.basename(db_path)})"
-        score += 20
+        score += 15
     else:
         status["sync"] = f"{Fore.CYAN}[STANDALONE]{Style.RESET_ALL}"
         status["db_desc"] = "Mode Mandiri (Database 9Router tidak terdeteksi)" if lang == "ID" else "Standalone mode"
@@ -1021,6 +1069,7 @@ def show_interactive_menu():
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}Dependensi Inti : {st['deps_badge']} {Fore.LIGHTBLACK_EX}{st['deps_desc']}
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}Webshare Hunter : {st['webshare']} {Fore.LIGHTBLACK_EX}{st['webshare_desc']}
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}CapSolver Engine: {st['capsolver_badge']} {Fore.LIGHTBLACK_EX}{st['capsolver_desc']}
+  {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}Cloudflare Mail : {st.get('cf_mail', '')} {Fore.LIGHTBLACK_EX}{st.get('cf_desc', '')}
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}BansosRouter DB : {st['sync']} {Fore.LIGHTBLACK_EX}{st['db_desc']}
   {Fore.LIGHTBLACK_EX}└─ {Fore.WHITE}Stok di Gudang  : {st['storage']} {Fore.LIGHTBLACK_EX}{st['storage_desc']}
 
@@ -1067,6 +1116,7 @@ def show_interactive_menu():
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}Core Dependencies: {st['deps_badge']} {Fore.LIGHTBLACK_EX}{st['deps_desc']}
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}Webshare Hunter  : {st['webshare']} {Fore.LIGHTBLACK_EX}{st['webshare_desc']}
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}CapSolver Engine : {st['capsolver_badge']} {Fore.LIGHTBLACK_EX}{st['capsolver_desc']}
+  {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}Cloudflare Mail  : {st.get('cf_mail', '')} {Fore.LIGHTBLACK_EX}{st.get('cf_desc', '')}
   {Fore.LIGHTBLACK_EX}├─ {Fore.WHITE}BansosRouter DB  : {st['sync']} {Fore.LIGHTBLACK_EX}{st['db_desc']}
   {Fore.LIGHTBLACK_EX}└─ {Fore.WHITE}Ammo in Storage  : {st['storage']} {Fore.LIGHTBLACK_EX}{st['storage_desc']}
 
