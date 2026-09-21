@@ -45,6 +45,8 @@ ENV/
 # Output cache & private proxies (preserve directory via output/.gitignore)
 output/*
 !output/.gitignore
+proxies.txt
+!proxies.example.txt
 
 # Local custom automation scripts & private runners (never commit or push)
 local_*.py
@@ -53,4 +55,8 @@ local_*.bat
 *.local.sh
 local_config.json
 config/settings.json
+# Temporary experiment & debug artifacts
+captcha-solver/
+scratch/
+
 

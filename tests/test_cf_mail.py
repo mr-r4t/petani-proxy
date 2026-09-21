@@ -24,6 +24,18 @@ class TestCloudflareMail(unittest.TestCase):
         link = extract_verification_link(sample_text)
         self.assertEqual(link, "https://dashboard.webshare.io/auth/verify?token=xyz123")
 
+    def test_extract_decodo_verification_link(self):
+        sample_email = """
+        Hey, We're happy you've joined *Decodo* !
+        https://dashboard.decodo.com/verify/7c8035af8bcc862be478e8a03ede16daec2f0349/3a705936-6d4e-47c8-b5c0-65e54d4f0796/
+        The link will expire in 60 minutes.
+        """
+        link = extract_verification_link(sample_email)
+        self.assertEqual(
+            link,
+            "https://dashboard.decodo.com/verify/7c8035af8bcc862be478e8a03ede16daec2f0349/3a705936-6d4e-47c8-b5c0-65e54d4f0796/"
+        )
+
     def test_extract_otp_code(self):
         sample_text = "Your Webshare verification code is 482910. It expires in 10 minutes."
         code = extract_otp_code(sample_text)

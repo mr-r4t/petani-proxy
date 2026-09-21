@@ -1078,6 +1078,8 @@ def show_interactive_menu():
   {Fore.YELLOW}{Style.BRIGHT}⭐ [MVP] AMUNISI SULTAN: IP RESIDENTIAL & CLOUDFLARE WARP
   {Fore.YELLOW}{Style.BRIGHT}[W]{Fore.WHITE}{Style.BRIGHT} 🏢 Webshare Hunter Gacor   {st['webshare']} {Fore.YELLOW}(RESIDENTIAL MVP ⭐⭐⭐)
      {Fore.GREEN}└─ Auto-Solve Captcha Suara • IP Rumah Asli • 10-30 Proxy/Akun
+  {Fore.MAGENTA}{Style.BRIGHT}[D]{Fore.WHITE}{Style.BRIGHT} 🦊 Decodo Residential Hunt {Fore.GREEN}[CAMOUFOX]{Style.RESET_ALL} {Fore.YELLOW}(AUTO CF MAIL & CC TRIAL)
+     {Fore.GREEN}└─ Camoufox Headless • Auto-Register & Verify • Klaim Trial Resi HTTP
   {Fore.CYAN}{Style.BRIGHT}[C]{Fore.WHITE}{Style.BRIGHT} 🚀 Cloudflare WARP Local    {Fore.GREEN}[ULTRA FAST]{Style.RESET_ALL} {Fore.CYAN}(BEBAS CAPTCHA, UNLIMITED)
      {Fore.GREEN}└─ Akun WireGuard Resmi • Mixed SOCKS5/HTTP • Latency <100ms
   {Fore.LIGHTCYAN_EX}{Style.BRIGHT}[F]{Fore.WHITE}{Style.BRIGHT} ⚡ aiohttp Fast Harvester   {Fore.GREEN}[KENCANG]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}(Filter <350ms dalam 1 detik)
@@ -1104,7 +1106,7 @@ def show_interactive_menu():
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   {Fore.LIGHTBLACK_EX}Maintainer: {Fore.YELLOW}@itzluthfi{Fore.LIGHTBLACK_EX}          Repository: {Fore.WHITE}github.com/itzluthfi
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}"""
-            prompt_str = f"{Fore.YELLOW}Pilih Opsi [W, C, F, G, 1-3, E, T, H, K, U, M, S, L, 0] (Saran: W atau C untuk speed monster): {Style.RESET_ALL}"
+            prompt_str = f"{Fore.YELLOW}Pilih Opsi [W, D, C, F, G, 1-3, E, T, H, K, U, M, S, L, 0] (Saran: W atau D untuk residential): {Style.RESET_ALL}"
         else:
             u_line = f"  {Fore.YELLOW}{Style.BRIGHT}[U]{Fore.WHITE}{Style.BRIGHT} 🚀 New Update Available!  {Fore.GREEN}v{cached_update_info.get('remote_version')} [SELECT TO UPDATE]\n" if (cached_update_info and cached_update_info.get("has_update")) else f"  {Fore.GREEN}[U]{Fore.WHITE} 🔄 Check & Update Version {Fore.GREEN}[v{local_ver} LATEST]{Style.RESET_ALL}\n"
             menu_box = f"""{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1125,6 +1127,8 @@ def show_interactive_menu():
   {Fore.YELLOW}{Style.BRIGHT}⭐ [MVP] S-TIER ARSENAL: RESIDENTIAL & CLOUDFLARE WARP
   {Fore.YELLOW}{Style.BRIGHT}[W]{Fore.WHITE}{Style.BRIGHT} 🏢 Webshare Hunter Elite   {st['webshare']} {Fore.YELLOW}(RESIDENTIAL MVP ⭐⭐⭐)
      {Fore.GREEN}└─ Audio Captcha Solver • Real Residential IPs • 10-30 Nodes/Acc
+  {Fore.MAGENTA}{Style.BRIGHT}[D]{Fore.WHITE}{Style.BRIGHT} 🦊 Decodo Residential Hunt {Fore.GREEN}[CAMOUFOX]{Style.RESET_ALL} {Fore.YELLOW}(AUTO CF MAIL & CC TRIAL)
+     {Fore.GREEN}└─ Camoufox Headless • Auto-Register & Verify • Claim Resi Trial HTTP
   {Fore.CYAN}{Style.BRIGHT}[C]{Fore.WHITE}{Style.BRIGHT} 🚀 Cloudflare WARP Local    {Fore.GREEN}[ULTRA FAST]{Style.RESET_ALL} {Fore.CYAN}(ZERO CAPTCHA, UNLIMITED)
      {Fore.GREEN}└─ Official WireGuard Profile • Mixed SOCKS5/HTTP • Latency <100ms
   {Fore.LIGHTCYAN_EX}{Style.BRIGHT}[F]{Fore.WHITE}{Style.BRIGHT} ⚡ aiohttp Fast Harvester   {Fore.GREEN}[FAST]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}(Sub-350ms filter in 1 second)
@@ -1151,7 +1155,7 @@ def show_interactive_menu():
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   {Fore.LIGHTBLACK_EX}Maintainer: {Fore.YELLOW}@itzluthfi{Fore.LIGHTBLACK_EX}          Repository: {Fore.WHITE}github.com/itzluthfi
 {Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}"""
-            prompt_str = f"{Fore.YELLOW}Select Option [W, C, F, G, 1-3, E, T, H, K, U, M, S, L, 0] (Pro-tip: Press W or C for godmode): {Style.RESET_ALL}"
+            prompt_str = f"{Fore.YELLOW}Select Option [W, D, C, F, G, 1-3, E, T, H, K, U, M, S, L, 0] (Pro-tip: Press W or D for residential): {Style.RESET_ALL}"
 
 
 
@@ -1340,6 +1344,49 @@ print("IP Aktif Residential:", resp.json()["ip"])
                     else:
                         break
             continue
+        elif choice.lower() == "d":
+            try:
+                from core.decodo_hunter import run_decodo_hunter, get_decodo_headless_config
+            except ImportError as e:
+                print(f"\n{Fore.RED}⚠️ Dependensi Camoufox / Decodo Hunter belum lengkap: {e}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}👉 Jalankan: pip install camoufox && camoufox fetch{Style.RESET_ALL}\n")
+                continue
+
+            is_hl = get_decodo_headless_config()
+            mode_desc = "HEADLESS" if is_hl else "HEADFUL"
+            print(f"\n{Fore.MAGENTA}{Style.BRIGHT}{f'🦊 MEMBUKA DECODO RESIDENTIAL HUNTER ({mode_desc})...' if CURRENT_LANG == 'ID' else f'🦊 LAUNCHING DECODO RESIDENTIAL HUNTER ({mode_desc})...'}{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLACK_EX}{'💡 Info: Auto register & verifikasi email Cloudflare, klaim trial kartu kredit, dan ekspor proxy HTTP.' if CURRENT_LANG == 'ID' else '💡 Info: Auto register & Cloudflare email verify, credit card trial claim, and HTTP proxy export.'}{Style.RESET_ALL}")
+            acc_prompt = f"{Fore.CYAN}{'Berapa akun Decodo yang ingin dipanen? [Default: 1]: ' if CURRENT_LANG == 'ID' else 'How many Decodo accounts to hunt? [Default: 1]: '}{Style.RESET_ALL}"
+            a_input = input(acc_prompt).strip()
+            total_acc = int(a_input) if a_input.isdigit() and int(a_input) > 0 else 1
+
+            db_target = find_9router_db()
+            run_decodo_hunter(total=total_acc, headless=None, sync_9router_db=db_target)
+
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            decodo_file = os.path.join(base_dir, "output", "decodo_residential.txt")
+            acc_file = os.path.join(base_dir, "output", "decodo_accounts.txt")
+            fm_name = "File Explorer" if sys.platform == "win32" else "Finder" if sys.platform == "darwin" else "File Manager"
+            ed_name = "Notepad" if sys.platform == "win32" else "TextEdit" if sys.platform == "darwin" else "Text Editor"
+
+            while True:
+                print(f"\n{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+                print(f"{Fore.WHITE}{Style.BRIGHT}🦊 AMUNISI DECODO RESIDENTIAL SELESAI DIPROSES! PILIH AKSI:{Style.RESET_ALL}")
+                print(f"  {Fore.GREEN}[1]{Fore.WHITE} 📝 Buka File Daftar Akun di {ed_name} ({Fore.YELLOW}decodo_accounts.txt{Fore.WHITE})")
+                print(f"  {Fore.GREEN}[2]{Fore.WHITE} 📋 Buka File Proxy HTTP di {ed_name} ({Fore.YELLOW}decodo_residential.txt{Fore.WHITE})")
+                print(f"  {Fore.GREEN}[3]{Fore.WHITE} 📂 Buka Folder Output di {fm_name}")
+                print(f"  {Fore.RED}[0 / Enter]{Fore.WHITE} 🔙 Kembali ke Menu Utama")
+                print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+                sub = input(f"{Fore.YELLOW}Pilih aksi [1-3, 0=Kembali]: {Style.RESET_ALL}").strip()
+                if sub == "1":
+                    open_in_text_editor(acc_file)
+                elif sub == "2":
+                    open_in_text_editor(decodo_file)
+                elif sub == "3":
+                    open_in_explorer(os.path.join(base_dir, "output"))
+                else:
+                    break
+            continue
         elif choice.lower() == "c":
             print(f"\n{Fore.CYAN}{Style.BRIGHT}{'🚀 MEMBUAT PROFIL CLOUDFLARE WARP (WIREGUARD / SING-BOX)...' if CURRENT_LANG == 'ID' else '🚀 GENERATING CLOUDFLARE WARP PROFILE...'}{Style.RESET_ALL}")
             print(f"{Fore.LIGHTBLACK_EX}{'💡 Info: Registrasi resmi via Cloudflare REST API (100% legal, tanpa captcha, unlimited).' if CURRENT_LANG == 'ID' else '💡 Info: Official registration via Cloudflare REST API (zero captcha, unlimited).'}{Style.RESET_ALL}\n")
@@ -1472,7 +1519,9 @@ def main():
     parser.add_argument("--max-latency", type=int, default=1200, help="Maximum latency in ms for fast harvester (default: 1200)")
     parser.add_argument("--daemon-gateway", "-G", action="store_true", help="Run 24/7 resilient local gateway on port 8888 with auto-healer")
     parser.add_argument("--webshare", "-W", type=int, nargs="?", const=1, default=None, help="Trigger Webshare Residential Hunter for N accounts (default: 1)")
-    parser.add_argument("--headless", action="store_true", help="Run Webshare Hunter in headless mode")
+    parser.add_argument("--decodo", "-D", type=int, nargs="?", const=1, default=None, help="Trigger Decodo Residential Hunter for N accounts (Camoufox browser)")
+    parser.add_argument("--headless", action="store_true", help="Force headless mode (run browser in background)")
+    parser.add_argument("--headful", action="store_true", help="Force headful mode (display browser GUI)")
     parser.add_argument("--health-check", "-H", nargs="?", const="auto", default=None, help="Check health of saved proxy file (.txt or .json)")
     parser.add_argument("--update", action="store_true", help="Perform 1-click update via git pull and exit")
     parser.add_argument("--check-update", action="store_true", help="Check for available updates on GitHub and display patch notes")
@@ -1555,6 +1604,18 @@ def main():
                 print(f"Disarankan menjalankan tanpa flag --headless atau sediakan CAPSOLVER_API_KEY.{Style.RESET_ALL}\n")
 
         run_webshare_hunter(total=args.webshare, headless=args.headless, sync_9router_db=router_db, output_dir=args.output)
+        return
+
+    if args.decodo is not None:
+        try:
+            from core.decodo_hunter import run_decodo_hunter
+        except ImportError as e:
+            print(f"{Fore.RED}⚠️ Dependensi Camoufox / Decodo Hunter belum lengkap: {e}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Silakan jalankan: pip install camoufox && camoufox fetch{Style.RESET_ALL}\n")
+            sys.exit(1)
+
+        hl_override = True if args.headless else False if args.headful else None
+        run_decodo_hunter(total=args.decodo, headless=hl_override, sync_9router_db=router_db, output_dir=args.output)
         return
 
     proto_list = [args.protocol] if args.protocol != "all" else ["http", "socks4", "socks5"]

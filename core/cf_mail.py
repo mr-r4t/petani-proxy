@@ -35,8 +35,10 @@ def extract_verification_link(text: str) -> Optional[str]:
     if not text:
         return None
 
-    # Pola 1: Tautan eksplisit Webshare dengan kata verify / confirm / token / activate
+    # Pola 1: Tautan eksplisit Webshare & Decodo dengan kata verify / confirm / token / activate
     patterns = [
+        r'https?://(?:[a-zA-Z0-9-]+\.)*decodo\.com/verify/[^\s"\'<>]*',
+        r'https?://(?:[a-zA-Z0-9-]+\.)*decodo\.com/[^\s"\'<>]*(?:verify|confirm|token|activate)[^\s"\'<>]*',
         r'https?://(?:[a-zA-Z0-9-]+\.)*webshare\.io/(?:user/)?verify[^\s"\'<>]*',
         r'https?://(?:[a-zA-Z0-9-]+\.)*webshare\.io/(?:user/)?confirm[^\s"\'<>]*',
         r'https?://(?:[a-zA-Z0-9-]+\.)*webshare\.io/[^\s"\'<>]*(?:verify|confirm|token|activate)[^\s"\'<>]*',
@@ -51,12 +53,12 @@ def extract_verification_link(text: str) -> Optional[str]:
             clean = matches[0].rstrip(").,;")
             return clean
 
-    # Pola 3: Fallback ke URL apapun yang mengarah ke webshare.io selain homepage/login/terms
-    fallback_matches = re.findall(r'https?://(?:[a-zA-Z0-9-]+\.)*webshare\.io/[^\s"\'<>]+', text, re.IGNORECASE)
+    # Pola 3: Fallback ke URL apapun yang mengarah ke decodo.com atau webshare.io selain homepage/login/terms
+    fallback_matches = re.findall(r'https?://(?:[a-zA-Z0-9-]+\.)*(?:webshare\.io|decodo\.com)/[^\s"\'<>]+', text, re.IGNORECASE)
     for url in fallback_matches:
         u_clean = url.rstrip(").,;")
         u_lower = u_clean.lower()
-        if not any(skip in u_lower for skip in ["terms", "privacy", "unsubscribe", "login", "register", "help"]):
+        if not any(skip in u_lower for skip in ["terms", "privacy", "unsubscribe", "login", "register", "help", "support"]):
             return u_clean
 
     return None
@@ -183,9 +185,10 @@ class CloudflareMailClient:
         timeout: int = 120,
         poll_interval: int = 4,
         log: Optional[Callable[[str], None]] = None,
+        service_name: str = "Webshare / Decodo",
     ) -> dict:
         """
-        Polling Cloudflare Worker sampai email verifikasi dari Webshare tiba.
+        Polling Cloudflare Worker sampai email verifikasi tiba.
         Mengembalikan dict:
           {"type": "link", "value": "https://..."} atau
           {"type": "code", "value": "123456"}
@@ -221,7 +224,7 @@ class CloudflareMailClient:
 
             elapsed = int(time.time() - started)
             if log and attempts % 2 == 0:
-                log(f"[*] Menunggu email verifikasi Webshare (#{attempts}, {elapsed}s/{timeout}s)...")
+                log(f"[*] Menunggu email verifikasi {service_name} (#{attempts}, {elapsed}s/{timeout}s)...")
             time.sleep(poll_interval)
 
-        raise CloudflareMailError(f"Waktu tunggu email verifikasi habis ({timeout}s) untuk {address}")
+        raise CloudflareMailError(f"Waktu tunggu email verifikasi {service_name} habis ({timeout}s) untuk {address}")
