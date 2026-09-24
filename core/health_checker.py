@@ -257,7 +257,7 @@ def load_proxies_from_file(file_path: str) -> List[Dict[str, Any]]:
                         p["country"] = item.get("country", "Unknown")
                         p["country_code"] = item.get("country_code", "??")
                         p["anonymity"] = item.get("anonymity", "Elite")
-                        key = (p["ip"], p["port"], p["username"])
+                        key = (p["ip"], p["port"], p["username"], hash(p["password"]))
                         if key not in seen:
                             seen.add(key)
                             proxies.append(p)
@@ -268,7 +268,7 @@ def load_proxies_from_file(file_path: str) -> List[Dict[str, Any]]:
             for line in f:
                 p = parse_proxy_string(line)
                 if p:
-                    key = (p["ip"], p["port"], p["username"])
+                    key = (p["ip"], p["port"], p["username"], hash(p["password"]))
                     if key not in seen:
                         seen.add(key)
                         proxies.append(p)
