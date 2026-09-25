@@ -5,7 +5,7 @@ mode con: cols=108 lines=40
 cd /d "%~dp0"
 
 echo ========================================================================
-echo   🌾 Starting PetaniProxy: Panen Proxy Bersih, Segar & Residential 🚜
+echo   🌾 Starting PetaniProxy: Panen Proxy Bersih, Segar ^& Residential 🚜
 echo ========================================================================
 
 :: Smart Python Detection (Local project venv -> Developer venv -> System python)
@@ -21,7 +21,7 @@ if exist "%~dp0venv\Scripts\python.exe" (
 )
 
 :: Check Python availability
-%PY_CMD% --version >nul 2>&1
+"%PY_CMD%" --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERROR] Python tidak ditemukan di sistem Anda!
     echo Silakan install Python 3.8+ dari https://www.python.org/
@@ -31,14 +31,14 @@ if %errorlevel% neq 0 (
 )
 
 :: Auto install dependencies if missing
-%PY_CMD% -c "import httpx, requests, colorama, DrissionPage, speech_recognition" >nul 2>&1
+"%PY_CMD%" -c "import httpx, requests, colorama, DrissionPage, speech_recognition, cloakbrowser" >nul 2>&1
 if %errorlevel% neq 0 (
     echo.
     echo [SETUP] Memasang paket dependencies untuk pengguna baru...
-    %PY_CMD% -m pip install -r requirements.txt
+    "%PY_CMD%" -m pip install -r requirements.txt
     echo.
 )
 
 :: Run Harvester Interactive Menu
-%PY_CMD% main.py
+"%PY_CMD%" main.py
 pause

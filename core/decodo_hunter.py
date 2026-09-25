@@ -1,8 +1,8 @@
 """
-DECODO RESIDENTIAL PROXY HUNTER (CAMOUFOX HEADLESS VERSION)
+DECODO RESIDENTIAL PROXY HUNTER (CLOAKBROWSER HEADLESS VERSION)
 ------------------------------------------------------------
 Automasi pendaftaran akun Decodo (dahulu Smartproxy) menggunakan
-Camoufox Stealth Anti-Detect Firefox, verifikasi email via Cloudflare
+CloakBrowser Stealth Anti-Detect Chromium, verifikasi email via Cloudflare
 Worker Inbox, auto-claim free trial Residential Proxy dengan kartu kredit,
 serta ekspor proxy HTTP & akun ke folder output.
 """
@@ -192,6 +192,23 @@ def format_proxy_display(proxy_dict: Dict[str, Any]) -> str:
     user = proxy_dict.get("username")
     if user:
         return f"{server} (Auth: {user}:****)"
+    return server
+
+
+def format_proxy_string(proxy_dict: Dict[str, Any]) -> Optional[str]:
+    """Format dict proxy ke URL string (scheme://user:pass@host:port).
+
+    Dipakai untuk meneruskan proxy yang SAMA ke sidecar captcha-solver, agar
+    cf_clearance yang dipanen terikat ke IP proxy (replayable), bukan IP lokal.
+    """
+    server = proxy_dict.get("server")
+    if not server:
+        return None
+    user = proxy_dict.get("username")
+    pw = proxy_dict.get("password")
+    if user and pw:
+        scheme, _, host = server.partition("://")
+        return f"{scheme or 'http'}://{user}:{pw}@{host}"
     return server
 
 
@@ -623,38 +640,146 @@ def fill_shipping_address(page, addr: Dict[str, str], timeout: int = 15) -> bool
 
 
 def check_sidecar_health(solver_url: str) -> bool:
-    """Periksa apakah HTTP sidecar captcha-solver aktif dan merespons /health."""
+    """Periksa apakah sidecar aktif DAN mampu menyelesaikan captcha (bukan sekadar hidup).
+
+    Health check dangkal (status_code == 200) berbahaya: sidecar basi yang dijalankan
+    dengan interpreter tanpa cloakbrowser tetap membalas 200, tetapi tidak akan pernah
+    bisa menyelesaikan captcha -> hunt macet diam-diam tanpa error. Karena itu payload
+    /health diverifikasi: status == ok dan deps.cloakbrowser == True. Build lama yang
+    tidak mengirim field `deps` dianggap TIDAK sehat karena kemampuannya tak terverifikasi.
+    """
     try:
-        resp = requests.get(f"{solver_url.rstrip('/')}/health", timeout=1.5)
-        return resp.status_code == 200
+        resp = requests.get(f"{solver_url.rstrip('/')}/health", timeout=3.0)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            return False
+        deps = data.get("deps")
+        if not isinstance(deps, dict):
+            # Schema lama tanpa `deps` -> sidecar build basi, treat as down.
+            return False
+        return bool(deps.get("cloakbrowser"))
     except Exception:
         return False
 
 
-def ensure_sidecar_running(solver_url: str = "http://127.0.0.1:8877") -> bool:
-    """Jika solver_url lokal tidak aktif, otomatis spawn server.py di background."""
-    if check_sidecar_health(solver_url):
-        return True
+def sidecar_supports_grid_pick(solver_url: str) -> bool:
+    """True bila sidecar mengekspos endpoint vision grid-pick untuk hCaptcha in-page.
 
-    if "127.0.0.1" in solver_url or "localhost" in solver_url:
+    Dipakai untuk mendeteksi build sidecar BASI yang sudah hidup di port lokal:
+    build lama lolos health-check cloakbrowser tetapi tidak punya /hcaptcha/grid_pick,
+    sehingga puzzle checkout akan diam-diam jatuh ke penyelesaian manual (=> 0 proxy
+    pada run tanpa pengawasan). Caller harus restart sidecar lokal semacam itu.
+    """
+    try:
+        resp = requests.get(f"{solver_url.rstrip('/')}/health", timeout=3.0)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        if not isinstance(data, dict):
+            return False
+        return "hcaptcha_grid_pick" in (data.get("features") or [])
+    except Exception:
+        return False
+
+
+def _sidecar_python() -> str:
+    """Pilih interpreter yang memiliki dependensi sidecar: venv project > sys.executable."""
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for rel in (
+        os.path.join(".venv", "Scripts", "python.exe"),   # Windows
+        os.path.join(".venv", "bin", "python"),           # POSIX
+    ):
+        cand = os.path.join(base_dir, rel)
+        if os.path.exists(cand):
+            return cand
+    return sys.executable
+
+
+def _kill_stale_sidecar_on_port(solver_url: str) -> bool:
+    """Bebaskan port sidecar lokal dari proses Python basi (sidecar build lama).
+
+    Sidecar lama yang masih memegang port membuat proses baru gagal bind -> hunt
+    berjalan tanpa solver. Hanya proses bernama python/pythonw yang dimatikan agar
+    proses lain di port tersebut tidak tersentuh.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        port = urlsplit(solver_url).port or 8877
+    except Exception:
+        port = 8877
+    try:
+        import subprocess
+        flags = subprocess.CREATE_NO_WINDOW
+        net = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, text=True, timeout=10, creationflags=flags
+        )
+        pids = set()
+        for line in (net.stdout or "").splitlines():
+            parts = line.split()
+            if (len(parts) >= 5 and parts[0].upper() == "TCP"
+                    and parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING"):
+                pids.add(parts[4])
+        killed = False
+        for pid in pids:
+            tl = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=10, creationflags=flags
+            )
+            name = (tl.stdout or "").strip().strip('"').split('","')[0].strip('"').lower()
+            if "python" in name:
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", pid],
+                    capture_output=True, text=True, timeout=10, creationflags=flags
+                )
+                print(f"  {Fore.YELLOW}[!] Sidecar basi (PID {pid}, {name}) dibersihkan dari port {port}.{Style.RESET_ALL}")
+                killed = True
+        return killed
+    except Exception as e:
+        print(f"  {Fore.LIGHTBLACK_EX}Info bersihkan port sidecar: {e}{Style.RESET_ALL}")
+        return False
+
+
+def ensure_sidecar_running(solver_url: str = "http://127.0.0.1:8877") -> bool:
+    """Pastikan sidecar lokal aktif & mampu solve; bersihkan yang basi lalu spawn bila perlu."""
+    is_local = ("127.0.0.1" in solver_url) or ("localhost" in solver_url)
+
+    if check_sidecar_health(solver_url):
+        # Sidecar lokal yang HIDUP tetapi tidak punya grid-pick = build basi: restart
+        # agar hCaptcha checkout tidak diam-diam jatuh ke penyelesaian manual.
+        if not is_local or sidecar_supports_grid_pick(solver_url):
+            return True
+        print(f"  {Fore.YELLOW}[!] Sidecar lokal basi (tanpa grid-pick) — me-restart...{Style.RESET_ALL}")
+        _kill_stale_sidecar_on_port(solver_url)
+        time.sleep(1)
+
+    if is_local:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         server_py = os.path.join(base_dir, "captcha-solver", "server.py")
         if os.path.exists(server_py):
+            # Sidecar basi (mis. build lama tanpa cloakbrowser) sering masih memegang
+            # port -> proses baru gagal bind. Bersihkan dulu sebelum spawn.
+            _kill_stale_sidecar_on_port(solver_url)
             try:
-                print(f"  {Fore.CYAN}[*] Memulai sidecar captcha-solver lokal (:8877) di background...{Style.RESET_ALL}")
+                print(f"  {Fore.CYAN}[*] Memulai sidecar captcha-solver lokal ({solver_url}) di background...{Style.RESET_ALL}")
                 import subprocess
+                py = _sidecar_python()
                 subprocess.Popen(
-                    [sys.executable, server_py],
+                    [py, server_py],
                     cwd=os.path.join(base_dir, "captcha-solver"),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                 )
-                for _ in range(12):
+                for _ in range(25):
                     time.sleep(1)
                     if check_sidecar_health(solver_url):
-                        print(f"  {Fore.GREEN}✓ Sidecar captcha-solver berhasil diaktifkan ({solver_url})!{Style.RESET_ALL}")
+                        print(f"  {Fore.GREEN}✓ Sidecar captcha-solver siap & mampu solve ({solver_url})!{Style.RESET_ALL}")
                         return True
+                print(f"  {Fore.YELLOW}[!] Sidecar belum siap setelah 25 detik — hunt lanjut TANPA solver sidecar.{Style.RESET_ALL}")
             except Exception as e:
                 print(f"  {Fore.YELLOW}[!] Gagal auto-start sidecar: {e}{Style.RESET_ALL}")
     return False
@@ -667,17 +792,23 @@ def solve_turnstile_via_sidecar(
     proxy_str: Optional[str] = None,
     timeout: int = 60
 ) -> Optional[str]:
-    """Mengirim request penyelesaian Cloudflare Turnstile ke HTTP sidecar waguriagentic/captcha-solver (direct tanpa proxy)."""
+    """Mengirim request penyelesaian Cloudflare Turnstile ke HTTP sidecar waguriagentic/captcha-solver (direct tanpa proxy).
+
+    `timeout_s` dikirim eksplisit agar deadline di server sidecar sama dengan timeout
+    klien — tanpa itu sidecar memakai default-nya sendiri dan solve lambat bisa
+    melewati batas waktu klien sehingga hunt menggantung tanpa token.
+    """
     try:
         endpoint = f"{solver_url.rstrip('/')}/solve"
         # Sesuai instruksi: Solver dijalankan langsung (direct local), TIDAK melalui proxy
         payload = {
             "type": "turnstile",
             "url": page_url,
-            "sitekey": sitekey
+            "sitekey": sitekey,
+            "timeout_s": int(timeout)
         }
 
-        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        resp = requests.post(endpoint, json=payload, timeout=timeout + 20)
         if resp.status_code == 200:
             data = resp.json()
             return data.get("token") or data.get("response") or data.get("solution")
@@ -709,19 +840,31 @@ def solve_hcaptcha_via_sidecar(
     page_url: str,
     sitekey: str,
     proxy_str: Optional[str] = None,
-    timeout: int = 60
+    timeout: int = 90
 ) -> Optional[str]:
-    """Mengirim request penyelesaian hCaptcha ke HTTP sidecar waguriagentic/captcha-solver (direct tanpa proxy)."""
+    """Mengirim request penyelesaian hCaptcha ke HTTP sidecar waguriagentic/captcha-solver.
+
+    `timeout_s` dikirim eksplisit agar deadline global di server sidecar sama dengan
+    timeout klien — puzzle gambar yang butuh vision tidak diputus dini oleh default 60s.
+
+    `proxy_str` diteruskan agar token hCaptcha dicetak dari IP proxy yang SAMA dengan
+    browser yang memakainya. hCaptcha mengikat token ke IP penyelesai, sehingga token
+    yang dibuat dari IP lokal akan DITOLAK oleh Decodo (IP-bound mismatch).
+    """
     try:
         endpoint = f"{solver_url.rstrip('/')}/solve"
-        # Sesuai instruksi: Solver dijalankan langsung (direct local), TIDAK melalui proxy
         payload = {
             "type": "hcaptcha",
             "url": page_url,
-            "sitekey": sitekey
+            "sitekey": sitekey,
+            "timeout_s": int(timeout)
         }
+        # Token hCaptcha terikat ke IP penyelesai: teruskan proxy yang sama dengan browser
+        # agar token tetap valid saat dipakai submit dari browser ber-proxy itu.
+        if proxy_str:
+            payload["proxy"] = proxy_str
 
-        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        resp = requests.post(endpoint, json=payload, timeout=timeout + 20)
         if resp.status_code == 200:
             data = resp.json()
             cand = data.get("token") or data.get("response") or data.get("solution")
@@ -740,13 +883,16 @@ def inject_hcaptcha_token(page, token: str) -> bool:
         try:
             inj = target.evaluate('''(token) => {
                 let injected = false;
-                // 1. Isi elemen form response
+                // 1. Isi elemen form response (pakai native setter agar React onChange terpicu)
                 const selectors = ['[name="h-captcha-response"]', '[name="g-recaptcha-response"]', 'textarea[name*="h-captcha"]', 'textarea[name*="hcaptcha"]'];
                 for (const sel of selectors) {
-                    const els = document.querySelectorAll(sel);
-                    els.forEach(el => {
-                        el.value = token;
-                        el.innerHTML = token;
+                    document.querySelectorAll(sel).forEach(el => {
+                        try {
+                            const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                            const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                            setter.call(el, token);
+                        } catch(e) { el.value = token; }
+                        try { el.innerHTML = token; } catch(e) {}
                         el.dispatchEvent(new Event('input', {bubbles: true}));
                         el.dispatchEvent(new Event('change', {bubbles: true}));
                         injected = true;
@@ -761,8 +907,9 @@ def inject_hcaptcha_token(page, token: str) -> bool:
                     injected = true;
                 }
 
-                // 3. Panggil API hcaptcha runtime jika tersedia
+                // 3. Paksa API runtime hcaptcha mengembalikan token (banyak SPA membaca via ini)
                 if (window.hcaptcha) {
+                    try { window.hcaptcha.getResponse = function() { return token; }; injected = true; } catch(e){}
                     if (typeof window.hcaptcha.setResponse === 'function') {
                         try { window.hcaptcha.setResponse(token); injected = true; } catch(e){}
                     }
@@ -800,6 +947,244 @@ def inject_hcaptcha_token(page, token: str) -> bool:
     return injected_any
 
 
+# ── In-page hCaptcha challenge solver (enterprise sitekeys) ──────────
+# Decodo's checkout uses an enterprise hCaptcha whose token is bound to the page's
+# signed `rqdata` + session, so a token minted by the sidecar's OWN browser is rejected
+# by Decodo's backend and the modal hangs forever (=> 0 proxies). We therefore solve
+# the challenge INSIDE the real page: capture the canvas, ask the sidecar's vision
+# backend for numbered-grid picks, click those cells with real OS-level mouse events,
+# and let the REAL widget mint the token. Falls back to human solving in headful mode.
+
+_HCAP_GRID = 4
+
+_HCAP_META_JS = """() => {
+    const txt = document.body.innerText || '';
+    const lines = txt.split('\\n').filter(l => l.trim());
+    const task = lines.find(l =>
+        !l.includes('try again') && !l.match(/^(Skip|Verify|Next|EN)$/) && l.length > 5
+    ) || '';
+    const c = document.querySelector('canvas');
+    const hasDrag = /^drag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
+    const btn = document.querySelector('.button-submit');
+    return {
+        target: task,
+        hasCanvas: !!c,
+        isDrag: hasDrag,
+        buttonText: btn ? btn.innerText.trim() : '',
+    };
+}"""
+
+_HCAP_CANVAS_JS = """() => {
+    const c = document.querySelector('canvas');
+    if (!c) return '';
+    try { return c.toDataURL('image/png').split(',')[1]; } catch(e) { return ''; }
+}"""
+
+
+def _find_hcaptcha_challenge_frame(page):
+    """Frame hosting the hCaptcha image challenge (#frame=challenge), or None."""
+    for f in page.frames:
+        u = f.url or ""
+        if "#frame=challenge" in u and "hcaptcha" in u:
+            return f
+    return None
+
+
+def _hcap_meta(fr) -> Dict[str, Any]:
+    try:
+        return fr.evaluate(_HCAP_META_JS) or {}
+    except Exception:
+        return {}
+
+
+def _hcap_canvas_b64(page) -> str:
+    """Base64 PNG of the challenge canvas, preferring the challenge frame.
+
+    The checkout page can host unrelated canvases (Stripe renders some), so we
+    try the challenge frame (and its children) FIRST, then fall back to any frame.
+    """
+    fr = _find_hcaptcha_challenge_frame(page)
+    ordered = []
+    if fr:
+        ordered += [fr, *fr.child_frames]
+    ordered += [f for f in page.frames if f not in ordered]
+    for f in ordered:
+        try:
+            b64 = f.evaluate(_HCAP_CANVAS_JS)
+            if b64:
+                return b64
+        except Exception:
+            continue
+    return ""
+
+
+def _hcap_canvas_box(page) -> Optional[Dict[str, float]]:
+    """Bounding box of the challenge canvas, preferring the challenge frame."""
+    fr = _find_hcaptcha_challenge_frame(page)
+    ordered = []
+    if fr:
+        ordered += [fr, *fr.child_frames]
+    ordered += [f for f in page.frames if f not in ordered]
+    for f in ordered:
+        try:
+            box = f.locator("canvas").first.bounding_box()
+            if box:
+                return box
+        except Exception:
+            continue
+    return None
+
+
+def _sidecar_grid_pick(solver_url: str, image_b64: str, target: str,
+                       mode: str = "click", grid: int = _HCAP_GRID,
+                       timeout: int = 60) -> List[int]:
+    """Ask the sidecar's vision backend which numbered-grid cells satisfy the task."""
+    try:
+        endpoint = f"{solver_url.rstrip('/')}/hcaptcha/grid_pick"
+        payload = {"image_b64": image_b64, "target": target or "",
+                   "grid": grid, "mode": mode}
+        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        if resp.status_code == 200:
+            out = []
+            for c in (resp.json().get("cells") or []):
+                try:
+                    out.append(int(c))
+                except (TypeError, ValueError):
+                    continue
+            return out
+    except Exception as e:
+        print(f"  {Fore.LIGHTBLACK_EX}Info grid_pick: {e}{Style.RESET_ALL}")
+    return []
+
+
+def _hcap_click_cells(page, indices: List[int], grid: int = _HCAP_GRID) -> bool:
+    """Click grid cells on the real canvas via OS-level mouse events."""
+    box = _hcap_canvas_box(page)
+    if not box:
+        return False
+    tw = box["width"] / grid
+    th = box["height"] / grid
+    for idx in indices:
+        x = box["x"] + (idx % grid + 0.5) * tw
+        y = box["y"] + (idx // grid + 0.5) * th
+        try:
+            page.mouse.click(x, y)
+            time.sleep(0.3)
+        except Exception:
+            pass
+    return True
+
+
+def _hcap_drag_cells(page, src: int, tgt: int, grid: int = _HCAP_GRID) -> bool:
+    """Execute a programmatic drag from cell `src` to cell `tgt`."""
+    box = _hcap_canvas_box(page)
+    if not box:
+        return False
+    tw = box["width"] / grid
+    th = box["height"] / grid
+
+    def _center(idx):
+        return (box["x"] + (idx % grid + 0.5) * tw,
+                box["y"] + (idx // grid + 0.5) * th)
+
+    sx, sy = _center(src)
+    tx, ty = _center(tgt)
+    try:
+        page.mouse.move(sx, sy)
+        time.sleep(0.2)
+        page.mouse.down()
+        steps = 10
+        for i in range(1, steps + 1):
+            page.mouse.move(sx + (tx - sx) * i / steps,
+                            sy + (ty - sy) * i / steps)
+            time.sleep(0.05)
+        page.mouse.up()
+        time.sleep(1)
+        return True
+    except Exception:
+        return False
+
+
+def _hcap_click_submit(page) -> str:
+    """Click the challenge's submit button (Skip/Next/Verify). Returns its text."""
+    fr = _find_hcaptcha_challenge_frame(page)
+    if not fr:
+        return ""
+    try:
+        btn = fr.query_selector(".button-submit")
+        if btn:
+            text = (btn.inner_text() or "").strip()
+            btn.click(timeout=5000)
+            time.sleep(2)
+            return text
+    except Exception:
+        pass
+    return ""
+
+
+def solve_hcaptcha_challenge_in_page(page, solver_url: str,
+                                     max_pages: int = 3) -> bool:
+    """Drive the live hCaptcha challenge to completion inside the real page.
+
+    Uses the sidecar's vision backend for the numbered-grid pick but performs all
+    clicks in THIS browser, so the widget mints a session-bound token Decodo accepts.
+    """
+    fr = _find_hcaptcha_challenge_frame(page)
+    if not fr:
+        return False
+
+    # The challenge UI animates in — wait for the canvas before reading it.
+    meta = _hcap_meta(fr)
+    deadline = time.time() + 15
+    while not meta.get("hasCanvas") and time.time() < deadline:
+        time.sleep(0.5)
+        fr = _find_hcaptcha_challenge_frame(page) or fr
+        meta = _hcap_meta(fr)
+    if not meta.get("hasCanvas"):
+        return False
+
+    for page_num in range(1, max_pages + 1):
+        fr = _find_hcaptcha_challenge_frame(page)
+        if not fr:
+            break
+        meta = _hcap_meta(fr)
+        btn_text = (meta.get("buttonText") or "").lower()
+        if btn_text in ("verify", "verifizieren", "verificar", "vahvista"):
+            _hcap_click_submit(page)
+            return True
+
+        target = meta.get("target") or ""
+        mode = "drag" if meta.get("isDrag") else "click"
+        b64 = _hcap_canvas_b64(page)
+        if not b64:
+            break
+        cells = _sidecar_grid_pick(solver_url, b64, target, mode=mode, timeout=45)
+        print(f"  {Fore.CYAN}[*] hCaptcha in-page (hal {page_num}): target={target[:45]!r} cells={cells}{Style.RESET_ALL}")
+
+        if mode == "drag" and len(cells) >= 2:
+            _hcap_drag_cells(page, cells[0], cells[1])
+        elif cells:
+            _hcap_click_cells(page, cells)
+        else:
+            # No confident pick — click the first row as a weak guess rather than stalling.
+            _hcap_click_cells(page, list(range(_HCAP_GRID)))
+
+        time.sleep(1.5)
+        clicked = _hcap_click_submit(page)
+        if btn_text in ("skip", "跳过", "huppel", "ohita", "überspringen"):
+            return False
+        if not clicked and not _find_hcaptcha_challenge_frame(page):
+            break
+        time.sleep(1.5)
+
+    fr = _find_hcaptcha_challenge_frame(page)
+    if fr:
+        meta = _hcap_meta(fr)
+        if (meta.get("buttonText") or "").lower() == "verify":
+            _hcap_click_submit(page)
+    return True
+
+
 def handle_hcaptcha_checkout_challenge(
     page,
     proxy_config: Dict[str, Any],
@@ -813,7 +1198,9 @@ def handle_hcaptcha_checkout_challenge(
     3. Hubungi sidecar captcha-solver (direct tanpa proxy).
     4. Jika token didapat dari sidecar: injeksi token, dispatch postMessage/callback, dan tunggu konfirmasi (JANGAN klik checkbox lagi agar tidak memicu puzzle baru).
     5. Jika token tidak tersedia: lakukan satu klik humanized pada checkbox 'I am human'.
-    6. Jika muncul puzzle visual: beri peringatan di terminal dan beri waktu pengguna menyelesaikan.
+    6. Jika muncul puzzle visual: selesaikan OTOMATIS di dalam halaman asli (grid vision
+       sidecar + klik kanvas nyata, sehingga token di-mint oleh widget asli dan lolos
+       binding rqdata/sesi enterprise). Bila gagal, baru minta pengguna menyelesaikan manual.
     7. Verifikasi konfirmasi sukses 'Your purchase was successful'.
     """
     time.sleep(2)
@@ -846,6 +1233,9 @@ def handle_hcaptcha_checkout_challenge(
 
     # 2. Ekstrak sitekey dari seluruh frames
     target_solver = solver_url or load_solver_url()
+    # Proxy yang sama dengan browser: hCaptcha mengikat token ke IP penyelesai,
+    # jadi sidecar WAJIB menyelesaikan lewat proxy ini agar token tidak ditolak Decodo.
+    hcaptcha_proxy_str = format_proxy_string(proxy_config) if proxy_config else None
     sitekey = None
     for f in page.frames:
         u = f.url or ""
@@ -876,8 +1266,9 @@ def handle_hcaptcha_checkout_challenge(
     token_injected = False
     if target_solver and sitekey and check_sidecar_health(target_solver):
         try:
-            print(f"  {Fore.CYAN}[*] Menghubungi captcha-solver sidecar ({target_solver}) untuk sitekey {sitekey[:8]} (direct)...{Style.RESET_ALL}")
-            token = solve_hcaptcha_via_sidecar(target_solver, page.url, sitekey)
+            _via = "via proxy" if hcaptcha_proxy_str else "direct"
+            print(f"  {Fore.CYAN}[*] Menghubungi captcha-solver sidecar ({target_solver}) untuk sitekey {sitekey[:8]} ({_via})...{Style.RESET_ALL}")
+            token = solve_hcaptcha_via_sidecar(target_solver, page.url, sitekey, proxy_str=hcaptcha_proxy_str)
             if token and isinstance(token, str) and len(token) > 10:
                 print(f"  {Fore.GREEN}✓ Token hCaptcha didapat dari solver sidecar! Menginjeksi token & memvalidasi respons...{Style.RESET_ALL}")
                 inject_hcaptcha_token(page, token)
@@ -907,36 +1298,39 @@ def handle_hcaptcha_checkout_challenge(
         except Exception as e:
             print(f"  {Fore.LIGHTBLACK_EX}Info sidecar: {e}{Style.RESET_ALL}")
 
-    # 3. Klik checkbox 'I am human' di browser HANYA jika token belum berhasil menyelesaikan modal
-    # Catatan: Gunakan satu klik natural (hover + click) agar tidak memicu bot detection
-    if not token_injected:
-        body_check = ""
-        try:
-            body_check = page.locator("body").inner_text()
-        except Exception:
-            pass
-        if "Your purchase was successful" in body_check or "Begin proxy setup" in body_check:
-            return True
+    # 3. Fallback: klik checkbox 'I am human' di browser bila modal BELUM terkonfirmasi.
+    #    PENTING: jangan hanya bergantung pada `token_injected`. Sitekey Decodo bergaya
+    #    enterprise (butuh rqdata yang ditandatangani halaman), sehingga token yang dicetak
+    #    sidecar dari widget generik bisa DITOLAK backend -> modal menggantung tanpa fallback.
+    #    Jadi selalu klik checkbox asli sekali (natural) agar challenge bisa dilanjutkan
+    #    oleh solver vision / diselesaikan manusia di jendela headful.
+    body_check = ""
+    try:
+        body_check = page.locator("body").inner_text()
+    except Exception:
+        pass
+    if "Your purchase was successful" in body_check or "Begin proxy setup" in body_check:
+        return True
 
-        for f in page.frames:
-            if "hcaptcha.com" in (f.url or "") and ("checkbox" in (f.url or "") or "#frame=checkbox" in (f.url or "")):
-                try:
-                    cb = f.locator('#checkbox, div#checkbox, [role="checkbox"], #anchor')
-                    if cb.count() > 0 and cb.first.is_visible():
-                        print(f"  {Fore.CYAN}[*] Mengklik checkbox 'I am human' hCaptcha secara natural...{Style.RESET_ALL}")
+    for f in page.frames:
+        if "hcaptcha.com" in (f.url or "") and ("checkbox" in (f.url or "") or "#frame=checkbox" in (f.url or "")):
+            try:
+                cb = f.locator('#checkbox, div#checkbox, [role="checkbox"], #anchor')
+                if cb.count() > 0 and cb.first.is_visible():
+                    print(f"  {Fore.CYAN}[*] Mengklik checkbox 'I am human' hCaptcha secara natural...{Style.RESET_ALL}")
+                    try:
+                        cb.first.hover(timeout=3000)
+                        time.sleep(0.3)
+                        cb.first.click(timeout=3000)
+                    except Exception:
                         try:
-                            cb.first.hover(timeout=3000)
-                            time.sleep(0.3)
-                            cb.first.click(timeout=3000)
+                            cb.first.click(force=True)
                         except Exception:
-                            try:
-                                cb.first.click(force=True)
-                            except Exception:
-                                pass
-                        time.sleep(2)
-                        break
-                except Exception:
-                    pass
+                            pass
+                    time.sleep(2)
+                    break
+            except Exception:
+                pass
 
     # 4. Pantau penyelesaian checkout
     has_prompted_challenge = False
@@ -954,12 +1348,32 @@ def handle_hcaptcha_checkout_challenge(
         # Deteksi apakah hCaptcha menampilkan puzzle gambar visual
         has_challenge = any("frame=challenge" in (f.url or "") for f in page.frames)
         if has_challenge and not has_prompted_challenge:
-            print(f"\n  {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
-            print(f"  {Fore.YELLOW}{Style.BRIGHT}⚠️ HCAPTCHA CHALLENGE TERDETEKSI DI BROWSER!{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}👉 Silakan selesaikan puzzle gambar hCaptcha di jendela browser yang terbuka.{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}   Bot akan otomatis mendeteksi konfirmasi pembelian saat Anda selesai.{Style.RESET_ALL}")
-            print(f"  {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}\n")
             has_prompted_challenge = True
+            solved_inpage = False
+            # Coba selesaikan OTOMATIS di dalam halaman asli (token di-mint widget asli,
+            # sehingga lolos binding rqdata/sesi enterprise). Jika gagal, baru minta manusia.
+            if target_solver and solve_hcaptcha_challenge_in_page(page, target_solver):
+                print(f"  {Fore.CYAN}[*] Puzzle hCaptcha diselesaikan otomatis (in-page). Menunggu konfirmasi...{Style.RESET_ALL}")
+                for _ in range(20):
+                    time.sleep(1)
+                    chk = ""
+                    try:
+                        chk = page.locator("body").inner_text()
+                    except Exception:
+                        pass
+                    if "Your purchase was successful" in chk or "Begin proxy setup" in chk:
+                        print(f"  {Fore.GREEN}✓ Konfirmasi checkout sukses setelah solve in-page!{Style.RESET_ALL}")
+                        return True
+                    if not any("frame=challenge" in (f.url or "") for f in page.frames):
+                        solved_inpage = True
+                        break
+
+            if not solved_inpage:
+                print(f"\n  {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+                print(f"  {Fore.YELLOW}{Style.BRIGHT}⚠️ HCAPTCHA CHALLENGE TERDETEKSI DI BROWSER!{Style.RESET_ALL}")
+                print(f"  {Fore.CYAN}👉 Silakan selesaikan puzzle gambar hCaptcha di jendela browser yang terbuka.{Style.RESET_ALL}")
+                print(f"  {Fore.CYAN}   Bot akan otomatis mendeteksi konfirmasi pembelian saat Anda selesai.{Style.RESET_ALL}")
+                print(f"  {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}\n")
 
         time.sleep(1)
 
@@ -974,7 +1388,7 @@ def generate_strong_password() -> str:
 
 
 def check_geoip_support() -> bool:
-    """Cek ketersediaan geoip2 ekstra untuk Camoufox."""
+    """Cek ketersediaan geoip2 ekstra (dipakai Camoufox & CloakBrowser)."""
     try:
         import geoip2
         return True
@@ -997,6 +1411,10 @@ def solve_cloudflare_via_sidecar(
             "url": page_url,
             "timeout_s": timeout
         }
+        # Teruskan proxy yang sama: cf_clearance terikat ke IP proxy, sehingga
+        # hasil panen tetap valid saat di-replay dari browser yang memakai proxy itu.
+        if proxy_str:
+            payload["proxy"] = proxy_str
 
         resp = requests.post(endpoint, json=payload, timeout=timeout + 10)
         if resp.status_code == 200:
@@ -1015,7 +1433,7 @@ def wait_for_cloudflare_and_form(
     solver_url: Optional[str] = None,
     proxy_str: Optional[str] = None
 ) -> bool:
-    """Tunggu Camoufox melewati challenge Cloudflare hingga elemen form muncul, auto-solve Turnstile/Cloudflare jika muncul (solver direct tanpa proxy)."""
+    """Tunggu CloakBrowser melewati challenge Cloudflare hingga elemen form muncul, auto-solve Turnstile/Cloudflare jika muncul (solver direct tanpa proxy)."""
     started = time.time()
     last_click_time = 0.0
     sidecar_attempted = False
@@ -1076,7 +1494,7 @@ def wait_for_cloudflare_and_form(
 
             # 2. Sidecar solver (direct tanpa proxy)
             target_solver = solver_url or load_solver_url()
-            if target_solver and elapsed >= 6 and not sidecar_attempted:
+            if target_solver and elapsed >= 30 and not sidecar_attempted:
                 if check_sidecar_health(target_solver):
                     sidecar_attempted = True
 
@@ -1103,11 +1521,18 @@ def wait_for_cloudflare_and_form(
                             inject_turnstile_token(page, token)
                             time.sleep(2)
 
-                    # 2b. Minta cf_clearance cookie dari sidecar (direct tanpa proxy)
-                    print(f"  {Fore.CYAN}[*] Cloudflare challenge terdeteksi ({int(elapsed)}s). Meminta cf_clearance ke sidecar (direct tanpa proxy)...{Style.RESET_ALL}")
-                    cf_data = solve_cloudflare_via_sidecar(target_solver, page.url, timeout=35)
+                    # 2b. Minta cf_clearance cookie dari sidecar (proxy yang sama agar replayable)
+                    print(f"  {Fore.CYAN}[*] Cloudflare challenge terdeteksi ({int(elapsed)}s). Meminta cf_clearance ke sidecar (via proxy yang sama)...{Style.RESET_ALL}")
+                    cf_data = solve_cloudflare_via_sidecar(target_solver, page.url, proxy_str=proxy_str, timeout=120)
                     if cf_data and cf_data.get("cookies"):
                         print(f"  {Fore.GREEN}✓ cf_clearance berhasil dipanen dari sidecar! Menginjeksi cookie ke browser...{Style.RESET_ALL}")
+                        # cf_clearance terikat ke User-Agent: selaraskan UA browser lokal dengan UA sidecar.
+                        try:
+                            sidecar_ua = cf_data.get("user_agent")
+                            if sidecar_ua:
+                                page.context.set_extra_http_headers({"User-Agent": sidecar_ua})
+                        except Exception:
+                            pass
                         cookies_to_add = []
                         for c in cf_data["cookies"]:
                             c_dict = {
@@ -1747,13 +2172,19 @@ def copy_all_proxies_via_download_menu(page) -> List[str]:
             # 4. Klik tombol 'Copy' di menu unduh yang muncul
             copy_info = page.evaluate(r'''() => {
                 const all = Array.from(document.querySelectorAll('*'));
-                const copyLeaf = all.find(e => {
-                    const t = e.textContent.trim();
+                const leafMatch = (e, needle, exact) => {
+                    const t = (e.textContent || '').trim().toLowerCase();
                     const r = e.getBoundingClientRect();
-                    return t.toLowerCase() === 'copy' &&
-                           r.width > 0 && r.height > 0 && r.height < 60 && r.width < 250 &&
-                           !Array.from(e.children).some(c => c.textContent.trim().toLowerCase() === 'copy');
-                });
+                    if (r.width <= 0 || r.height <= 0 || r.height >= 60 || r.width >= 300) return false;
+                    const ok = exact ? (t === needle) : t.includes(needle);
+                    if (!ok) return false;
+                    return !Array.from(e.children).some(c => {
+                        const ct = (c.textContent || '').trim().toLowerCase();
+                        return exact ? (ct === needle) : ct.includes(needle);
+                    });
+                };
+                let copyLeaf = all.find(e => leafMatch(e, 'copy', true));
+                if (!copyLeaf) copyLeaf = all.find(e => leafMatch(e, 'copy', false));
                 if (copyLeaf) {
                     const target = copyLeaf.closest('button, [role="menuitem"], [role="option"], li, div') || copyLeaf;
                     target.scrollIntoView({ block: 'center' });
@@ -1801,7 +2232,12 @@ def copy_all_proxies_via_download_menu(page) -> List[str]:
             copied_text = page.evaluate("() => window.__decodo_copied_proxies || ''")
             if not copied_text:
                 try:
-                    copied_text = page.evaluate("() => navigator.clipboard ? navigator.clipboard.readText() : ''")
+                    # Race terhadap timeout: page.evaluate menunggu promise yang dikembalikan,
+                    # jadi readText() yang terblokir prompt izin akan menggantung selamanya.
+                    copied_text = page.evaluate('''() => Promise.race([
+                        (navigator.clipboard ? navigator.clipboard.readText() : Promise.resolve('')).catch(() => ''),
+                        new Promise(r => setTimeout(() => r(''), 2500))
+                    ])''')
                 except Exception:
                     pass
 
@@ -1815,12 +2251,30 @@ def copy_all_proxies_via_download_menu(page) -> List[str]:
                     return list(dict.fromkeys(proxies))
 
             # 6. Fallback unduhan berkas .txt dari menu unduh
-            txt_btn = page.locator('button:has-text(".txt"), div[role="menuitem"]:has-text(".txt"), [role="menuitem"]:has-text("txt"), text=".txt"')
-            if txt_btn.count() > 0 and txt_btn.first.is_visible():
+            #    PENTING: JANGAN gabung engine Playwright 'text="..."' ke dalam daftar CSS
+            #    (page.locator menerima satu engine per string) -> dulu memicu
+            #    "Unexpected token =" yang membatalkan SELURUH panen. Coba satu per satu.
+            txt_btn = None
+            for _txt_sel in [
+                '[role="menuitem"]:has-text(".txt")',
+                '[role="menuitem"]:has-text("txt")',
+                'button:has-text(".txt")',
+                'button:has-text("txt")',
+                'a:has-text(".txt")',
+                'a:has-text("txt")',
+            ]:
+                try:
+                    _tl = page.locator(_txt_sel)
+                    if _tl.count() > 0 and _tl.first.is_visible():
+                        txt_btn = _tl.first
+                        break
+                except Exception:
+                    continue
+            if txt_btn is not None:
                 print(f"  {Fore.CYAN}[*] Menggunakan opsi unduhan .txt untuk memanen seluruh proxy...{Style.RESET_ALL}")
                 try:
                     with page.expect_download(timeout=5000) as dl_info:
-                        txt_btn.first.click(force=True)
+                        txt_btn.click(force=True)
                     dl = dl_info.value
                     dl_path = dl.path()
                     if dl_path and os.path.exists(dl_path):
@@ -2003,20 +2457,15 @@ def hunt_single_decodo(
     """
     Eksekusi alur pendaftaran 1 akun Decodo menggunakan proxy:
     1. Buat email Cloudflare
-    2. Register via Camoufox dengan proxy
+    2. Register via CloakBrowser dengan proxy
     3. Verifikasi email via inbox worker
     4. Navigasi aktivasi / klaim trial dengan kartu kredit
     5. Ambil proxy HTTP
     """
     try:
-        from camoufox.sync_api import Camoufox
-        try:
-            from camoufox import DefaultAddons
-            exclude_ubo = [DefaultAddons.UBO]
-        except Exception:
-            exclude_ubo = []
+        import cloakbrowser
     except ImportError:
-        raise RuntimeError("Camoufox belum terpasang. Jalankan: pip install camoufox && camoufox fetch")
+        raise RuntimeError("CloakBrowser belum terpasang. Jalankan: pip install cloakbrowser")
 
     cf_client = CloudflareMailClient.from_config()
     if not cf_client.is_configured():
@@ -2029,7 +2478,9 @@ def hunt_single_decodo(
 
     solver_url = load_solver_url()
     if solver_url:
-        ensure_sidecar_running(solver_url)
+        if not ensure_sidecar_running(solver_url):
+            print(f"  {Fore.YELLOW}[!] Captcha-solver sidecar tidak siap di {solver_url} — hunt tetap berjalan, "
+                  f"tetapi challenge captcha mungkin tidak terselesaikan otomatis.{Style.RESET_ALL}")
 
     result = {
         "email": email,
@@ -2047,33 +2498,35 @@ def hunt_single_decodo(
     print(f"{Fore.CYAN}│{Style.RESET_ALL} 🌐 Proxy      : {Fore.GREEN}{proxy_display}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}└────────────────────────────────────────────────────────────────────────┘{Style.RESET_ALL}")
 
-    proxy_with_bypass = proxy_config.copy()
-    proxy_with_bypass["bypass"] = "localhost,127.0.0.1,*.stripe.com,*.stripe.network,stripe.com,stripe.network,*.paypal.com,paypal.com,*.paypalobjects.com"
+    proxy_for_browser = proxy_config.copy()
+    proxy_for_browser["bypass"] = "localhost,127.0.0.1,*.stripe.com,*.stripe.network,stripe.com,stripe.network,*.paypal.com,paypal.com,*.paypalobjects.com"
 
-    firefox_prefs = {
-        "network.proxy.no_proxies_on": "localhost, 127.0.0.1, *.stripe.com, *.stripe.network, stripe.com, stripe.network, *.paypal.com, paypal.com, *.paypalobjects.com",
-        "network.cookie.cookieBehavior": 0,
-        "privacy.trackingprotection.enabled": False,
-        "privacy.trackingprotection.pbmode.enabled": False,
-    }
-
-    camoufox_opts = {
+    # CloakBrowser = stealth Chromium (Playwright). Camoufox (Firefox) TIDAK bisa
+    # melewati Cloudflare Decodo: iframe cross-origin tak bisa diklik (url=''), dan
+    # cf_clearance Chrome tak bisa di-replay ke Firefox (TLS/JA3 berbeda). Chromium
+    # memakai teknik klik humanized yang sama dan lolos challenge dalam ~30 detik.
+    browser_opts = {
         "headless": headless,
-        "proxy": proxy_with_bypass,
+        "proxy": proxy_for_browser,
         "humanize": True,
-        "firefox_user_prefs": firefox_prefs,
     }
-    if exclude_ubo:
-        camoufox_opts["exclude_addons"] = exclude_ubo
     if check_geoip_support():
-        camoufox_opts["geoip"] = True
+        browser_opts["geoip"] = True
 
     try:
-        with Camoufox(**camoufox_opts) as browser:
+        with cloakbrowser.launch(**browser_opts) as browser:
             page = browser.new_page()
 
+            # Izinkan baca/tulis clipboard: panen proxy via menu 'Copy' memakai
+            # navigator.clipboard. Di headful Chromium, readText() tanpa izin akan
+            # memunculkan prompt dan MENGGANTUNG page.evaluate tanpa batas waktu.
+            try:
+                page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+            except Exception:
+                pass
+
             # Step 1: Navigasi ke halaman pendaftaran Decodo
-            print(f"  {Fore.CYAN}[1/5] Membuka formulir pendaftaran Decodo via Camoufox & Proxy...{Style.RESET_ALL}")
+            print(f"  {Fore.CYAN}[1/5] Membuka formulir pendaftaran Decodo via CloakBrowser & Proxy...{Style.RESET_ALL}")
             try:
                 page.goto(DECODO_REGISTER_URL, wait_until="commit", timeout=45000)
             except Exception as e:
@@ -2082,7 +2535,7 @@ def hunt_single_decodo(
                 return result
 
             # Tunggu Cloudflare turnstile dan form muncul (solver auto-solve direct tanpa proxy)
-            if not wait_for_cloudflare_and_form(page, selector="#newEmail", timeout=60, solver_url=solver_url):
+            if not wait_for_cloudflare_and_form(page, selector="#newEmail", timeout=180, solver_url=solver_url, proxy_str=format_proxy_string(proxy_config)):
                 print(f"  {Fore.RED}[!] Timeout menunggu form pendaftaran Decodo (Cloudflare challenge / Proxy blocked).{Style.RESET_ALL}")
                 result["notes"] = "Timeout form register (Cloudflare Turnstile / Proxy blocked)"
                 return result
@@ -2117,7 +2570,7 @@ def hunt_single_decodo(
             try:
                 verif_data = cf_client.wait_for_verification(
                     address=email,
-                    timeout=90,
+                    timeout=180,
                     poll_interval=4,
                     log=lambda m: print(f"    {Fore.LIGHTBLACK_EX}{m}{Style.RESET_ALL}"),
                     service_name="Decodo"
@@ -2278,7 +2731,10 @@ def hunt_single_decodo(
                         print(f"  {Fore.YELLOW}[!] Tombol 'Save' belum ditemukan, mencoba submit form...{Style.RESET_ALL}")
 
                     # 4. Tangani modal hCaptcha ('One more step before you're done')
-                    hcap_ok = handle_hcaptcha_checkout_challenge(page, proxy_config, timeout=60)
+                    # Headful: beri waktu lebih panjang agar manusia/vision solver bisa
+                    # menyelesaikan puzzle setelah checkbox fallback memunculkannya.
+                    _hcap_timeout = 180 if not headless else 75
+                    hcap_ok = handle_hcaptcha_checkout_challenge(page, proxy_config, timeout=_hcap_timeout)
 
                     # 5. Cek konfirmasi sukses ('Your purchase was successful') & klik 'Begin proxy setup'
                     time.sleep(2)
@@ -2359,9 +2815,9 @@ def run_decodo_hunter(
     mode_label = f"{Fore.CYAN}Headless (Latar Belakang){Style.RESET_ALL}" if is_headless else f"{Fore.GREEN}{Style.BRIGHT}Headful (Tampil Jendela Browser){Style.RESET_ALL}"
 
     print(f"\n{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}{Style.BRIGHT}🌾 PETANIPROXY x DECODO RESIDENTIAL HUNTER (CAMOUFOX){Style.RESET_ALL}")
+    print(f"{Fore.GREEN}{Style.BRIGHT}🌾 PETANIPROXY x DECODO RESIDENTIAL HUNTER (CLOAKBROWSER){Style.RESET_ALL}")
     print(f"  • Target Akun       : {Fore.YELLOW}{total}{Style.RESET_ALL} Akun")
-    print(f"  • Engine Browser    : Camoufox Stealth Anti-Detect ({mode_label})")
+    print(f"  • Engine Browser    : CloakBrowser Stealth Anti-Detect Chromium ({mode_label})")
     print(f"  • Pool Proxy        : {Fore.GREEN}{len(proxy_pool)} Proxy Aktif di proxies.txt ✓{Style.RESET_ALL}")
     print(f"  • Verifikasi Email  : {cf_status_str}")
     print(f"  • Data Kartu Kredit : {card_status_str}")

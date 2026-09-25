@@ -16,5 +16,6 @@ aiohttp>=3.9.0
 aiohttp-socks>=0.8.4
 cryptography>=41.0.0
 
-# Decodo Residential Hunter (Camoufox Stealth Anti-Detect Browser)
-camoufox[geoip]>=0.5.6
+# Decodo Residential Hunter (CloakBrowser Stealth Anti-Detect Chromium)
+# Catatan: Camoufox (Firefox) TIDAK dapat melewati Cloudflare Decodo; Chromium bisa.
+cloakbrowser>=0.5.11

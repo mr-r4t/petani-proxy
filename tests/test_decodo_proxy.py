@@ -165,7 +165,7 @@ class TestDecodoProxyParser(unittest.TestCase):
         res = wait_for_checkout_page(mock_page, timeout=2)
         self.assertTrue(res)
 
-    def test_solver_functions_never_send_proxy(self):
+    def test_solver_proxy_forwarding_matches_ip_binding(self):
         from unittest.mock import patch, MagicMock
         from core.decodo_hunter import (
             solve_turnstile_via_sidecar,
@@ -177,27 +177,35 @@ class TestDecodoProxyParser(unittest.TestCase):
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"token": "dummy_tok", "solved": True, "cookies": [{"name": "cf_clearance", "value": "xyz"}]}
 
+        proxy_str = "http://45.38.107.97:6014"
+
         with patch("requests.post", return_value=mock_resp) as mock_post:
-            # 1. Turnstile: kirim proxy_str tapi pastikan TIDAK ada di json payload
-            tok1 = solve_turnstile_via_sidecar("http://127.0.0.1:8877", "https://decodo.com", "0x4AAAAAA", proxy_str="http://45.38.107.97:6014")
+            # 1. Turnstile: solved direct (token tidak IP-bound) -> proxy TIDAK dikirim
+            tok1 = solve_turnstile_via_sidecar("http://127.0.0.1:8877", "https://decodo.com", "0x4AAAAAA", proxy_str=proxy_str)
             self.assertEqual(tok1, "dummy_tok")
-            call_kwargs1 = mock_post.call_args[1]
-            self.assertNotIn("proxy", call_kwargs1["json"])
-            self.assertEqual(call_kwargs1["json"]["type"], "turnstile")
+            payload1 = mock_post.call_args[1]["json"]
+            self.assertNotIn("proxy", payload1)
+            self.assertEqual(payload1["type"], "turnstile")
+            self.assertEqual(payload1["timeout_s"], 60)
 
-            # 2. hCaptcha: kirim proxy_str tapi pastikan TIDAK ada di json payload
-            tok2 = solve_hcaptcha_via_sidecar("http://127.0.0.1:8877", "https://decodo.com", "10000000-ffff-ffff-ffff-000000000001", proxy_str="http://45.38.107.97:6014")
+            # 2. hCaptcha: token terikat IP penyelesai -> proxy HARUS diteruskan
+            tok2 = solve_hcaptcha_via_sidecar("http://127.0.0.1:8877", "https://decodo.com", "10000000-ffff-ffff-ffff-000000000001", proxy_str=proxy_str)
             self.assertEqual(tok2, "dummy_tok")
-            call_kwargs2 = mock_post.call_args[1]
-            self.assertNotIn("proxy", call_kwargs2["json"])
-            self.assertEqual(call_kwargs2["json"]["type"], "hcaptcha")
+            payload2 = mock_post.call_args[1]["json"]
+            self.assertEqual(payload2["proxy"], proxy_str)
+            self.assertEqual(payload2["type"], "hcaptcha")
+            self.assertEqual(payload2["timeout_s"], 90)
 
-            # 3. Cloudflare clearance: kirim proxy_str tapi pastikan TIDAK ada di json payload
-            cf_res = solve_cloudflare_via_sidecar("http://127.0.0.1:8877", "https://decodo.com", proxy_str="http://45.38.107.97:6014")
+            # 3. Cloudflare clearance: cf_clearance terikat IP proxy -> proxy HARUS diteruskan
+            cf_res = solve_cloudflare_via_sidecar("http://127.0.0.1:8877", "https://decodo.com", proxy_str=proxy_str)
             self.assertIsNotNone(cf_res)
-            call_kwargs3 = mock_post.call_args[1]
-            self.assertNotIn("proxy", call_kwargs3["json"])
-            self.assertEqual(call_kwargs3["json"]["type"], "cloudflare")
+            payload3 = mock_post.call_args[1]["json"]
+            self.assertEqual(payload3["proxy"], proxy_str)
+            self.assertEqual(payload3["type"], "cloudflare")
+
+            # 4. Tanpa proxy: field "proxy" tidak dikirim sama sekali (bukan null/kosong)
+            solve_hcaptcha_via_sidecar("http://127.0.0.1:8877", "https://decodo.com", "10000000-ffff-ffff-ffff-000000000001")
+            self.assertNotIn("proxy", mock_post.call_args[1]["json"])
 
     def test_inject_hcaptcha_token_multiframe(self):
         from unittest.mock import MagicMock
@@ -242,7 +250,8 @@ class TestDecodoProxyParser(unittest.TestCase):
 
         mock_page.frames = [mock_frame]
 
-        with patch("core.decodo_hunter.solve_hcaptcha_via_sidecar", return_value="mock_token"):
+        with patch("core.decodo_hunter.check_sidecar_health", return_value=True), \
+             patch("core.decodo_hunter.solve_hcaptcha_via_sidecar", return_value="mock_token"):
             res = handle_hcaptcha_checkout_challenge(mock_page, {}, solver_url="http://127.0.0.1:8877", timeout=5)
             self.assertTrue(res)
 
@@ -303,6 +312,60 @@ class TestDecodoProxyParser(unittest.TestCase):
                 self.assertEqual(len(res), 10)
                 self.assertEqual(res[0], "http://user:pass@gate.decodo.com:10001")
                 self.assertEqual(res[-1], "http://user:pass@gate.decodo.com:10010")
+
+    def test_check_sidecar_health_requires_capable_sidecar(self):
+        from core.decodo_hunter import check_sidecar_health
+
+        def resp(status_code=200, payload=None):
+            m = MagicMock()
+            m.status_code = status_code
+            m.json.return_value = payload if payload is not None else {}
+            return m
+
+        # Sidecar mampu (schema baru + cloakbrowser True) -> sehat
+        with patch("core.decodo_hunter.requests.get",
+                   return_value=resp(200, {"status": "ok", "deps": {"cloakbrowser": True, "playwright": True}})):
+            self.assertTrue(check_sidecar_health("http://127.0.0.1:8877"))
+
+        # Sidecar basi: 200 tetapi tanpa field deps -> TIDAK sehat (kemampuan tak terverifikasi)
+        with patch("core.decodo_hunter.requests.get",
+                   return_value=resp(200, {"status": "ok", "supported_types": ["hcaptcha"]})):
+            self.assertFalse(check_sidecar_health("http://127.0.0.1:8877"))
+
+        # deps ada tetapi cloakbrowser False (interpreter salah) -> TIDAK sehat
+        with patch("core.decodo_hunter.requests.get",
+                   return_value=resp(200, {"status": "ok", "deps": {"cloakbrowser": False, "playwright": True}})):
+            self.assertFalse(check_sidecar_health("http://127.0.0.1:8877"))
+
+        # Status HTTP non-200 -> TIDAK sehat
+        with patch("core.decodo_hunter.requests.get", return_value=resp(500, {})):
+            self.assertFalse(check_sidecar_health("http://127.0.0.1:8877"))
+
+        # Koneksi gagal -> TIDAK sehat
+        with patch("core.decodo_hunter.requests.get", side_effect=Exception("connection refused")):
+            self.assertFalse(check_sidecar_health("http://127.0.0.1:8877"))
+
+    def test_solve_hcaptcha_sends_timeout_s_without_proxy(self):
+        from core.decodo_hunter import solve_hcaptcha_via_sidecar
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"token": "tok_abc123456"}
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            tok = solve_hcaptcha_via_sidecar(
+                "http://127.0.0.1:8877", "https://decodo.com",
+                "10000000-ffff-ffff-ffff-000000000001", timeout=90
+            )
+            self.assertEqual(tok, "tok_abc123456")
+            payload = mock_post.call_args[1]["json"]
+            self.assertEqual(payload["timeout_s"], 90)
+            self.assertNotIn("proxy", payload)
+
+    def test_ensure_sidecar_running_true_when_deep_health_ok(self):
+        from core.decodo_hunter import ensure_sidecar_running
+        with patch("core.decodo_hunter.check_sidecar_health", return_value=True):
+            self.assertTrue(ensure_sidecar_running("http://127.0.0.1:8877"))
 
 
 if __name__ == "__main__":

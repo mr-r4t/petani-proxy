@@ -6,9 +6,12 @@ Pusat Amunisi Proxy Bersih, Segar & Berputar Otomatis (Local Rotating Gateway & 
 
 import os
 import sys
+import glob
 import time
 import json
 import argparse
+import importlib.util
+import subprocess
 import requests
 from typing import Optional, List
 
@@ -27,6 +30,79 @@ except ImportError:
         def __getattr__(self, name):
             return ""
     Fore = Style = DummyColor()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-heal interpreter: paket opsional (mis. cloakbrowser) hanya terpasang di
+# venv project. Tanpa ini, `py main.py` / `python main.py` memakai Python global
+# dan Decodo Hunter gagal dengan "No module named 'cloakbrowser'".
+# ─────────────────────────────────────────────────────────────────────────────
+_VENV_REEXEC_FLAG = "PETANIPROXY_VENV_REEXEC"
+
+
+def _venv_candidates(base_dir: str) -> List[str]:
+    """Kandidat interpreter venv project (venv lalu .venv, sama seperti run.bat)."""
+    rel = os.path.join("Scripts", "python.exe") if sys.platform == "win32" else os.path.join("bin", "python")
+    return [os.path.join(base_dir, name, rel) for name in ("venv", ".venv")]
+
+
+def _venv_has_package(python_path: str, package: str) -> bool:
+    """Cek isi site-packages venv langsung dari disk (tanpa spawn subprocess)."""
+    root = os.path.dirname(os.path.dirname(python_path))
+    patterns = (
+        os.path.join(root, "Lib", "site-packages", package),
+        os.path.join(root, "lib", "python*", "site-packages", package),
+    )
+    return any(glob.glob(p) for p in patterns)
+
+
+def _ensure_project_venv():
+    """
+    Re-exec ke venv project HANYA jika keempat syarat ini terpenuhi:
+      1. belum pernah re-exec (anti-loop),
+      2. tidak dimatikan via PETANIPROXY_NO_VENV,
+      3. interpreter aktif TIDAK punya `cloakbrowser`,
+      4. ada venv project yang PUNYA `cloakbrowser`.
+
+    Syarat 3+4 sengaja sempit supaya run yang sudah benar tidak pernah diubah.
+    """
+    if os.environ.get(_VENV_REEXEC_FLAG) or os.environ.get("PETANIPROXY_NO_VENV"):
+        return
+    try:
+        if importlib.util.find_spec("cloakbrowser") is not None:
+            return
+    except (ImportError, ValueError):
+        pass
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    current = os.path.abspath(sys.executable)
+    script = os.path.abspath(__file__)
+
+    for candidate in _venv_candidates(base_dir):
+        if not os.path.isfile(candidate):
+            continue
+        if os.path.abspath(candidate) == current:
+            continue
+        if not _venv_has_package(candidate, "cloakbrowser"):
+            continue
+
+        print(f"{Fore.YELLOW}[i] Interpreter aktif tidak punya 'cloakbrowser' "
+              f"({sys.executable})\n    ↳ beralih ke venv project: {candidate}{Style.RESET_ALL}")
+        os.environ[_VENV_REEXEC_FLAG] = "1"
+        argv = [candidate, script, *sys.argv[1:]]
+        try:
+            if sys.platform == "win32":
+                # os.execv di Windows menggabung argv jadi satu command line TANPA
+                # quoting, sehingga path berspasi ("D:\CODING PROJECT\...") pecah.
+                # subprocess meng-quote lewat list2cmdline, jadi aman.
+                sys.exit(subprocess.run(argv).returncode)
+            os.execv(candidate, argv)
+        except OSError as exc:
+            print(f"{Fore.RED}[!] Gagal beralih ke venv: {exc}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}    Jalankan manual: '{candidate}' '{script}'{Style.RESET_ALL}")
+            return
+
+
+_ensure_project_venv()
 
 from core.fetcher import fetch_proxies_sync
 from core.checker import check_proxies_pool, DEFAULT_TEST_URL
@@ -1078,8 +1154,8 @@ def show_interactive_menu():
   {Fore.YELLOW}{Style.BRIGHT}⭐ [MVP] AMUNISI SULTAN: IP RESIDENTIAL & CLOUDFLARE WARP
   {Fore.YELLOW}{Style.BRIGHT}[W]{Fore.WHITE}{Style.BRIGHT} 🏢 Webshare Hunter Gacor   {st['webshare']} {Fore.YELLOW}(RESIDENTIAL MVP ⭐⭐⭐)
      {Fore.GREEN}└─ Auto-Solve Captcha Suara • IP Rumah Asli • 10-30 Proxy/Akun
-  {Fore.MAGENTA}{Style.BRIGHT}[D]{Fore.WHITE}{Style.BRIGHT} 🦊 Decodo Residential Hunt {Fore.GREEN}[CAMOUFOX]{Style.RESET_ALL} {Fore.YELLOW}(AUTO CF MAIL & CC TRIAL)
-     {Fore.GREEN}└─ Camoufox Headless • Auto-Register & Verify • Klaim Trial Resi HTTP
+  {Fore.MAGENTA}{Style.BRIGHT}[D]{Fore.WHITE}{Style.BRIGHT} 🦊 Decodo Residential Hunt {Fore.GREEN}[CLOAKBROWSER]{Style.RESET_ALL} {Fore.YELLOW}(AUTO CF MAIL & CC TRIAL)
+     {Fore.GREEN}└─ CloakBrowser Headless • Auto-Register & Verify • Klaim Trial Resi HTTP
   {Fore.CYAN}{Style.BRIGHT}[C]{Fore.WHITE}{Style.BRIGHT} 🚀 Cloudflare WARP Local    {Fore.GREEN}[ULTRA FAST]{Style.RESET_ALL} {Fore.CYAN}(BEBAS CAPTCHA, UNLIMITED)
      {Fore.GREEN}└─ Akun WireGuard Resmi • Mixed SOCKS5/HTTP • Latency <100ms
   {Fore.LIGHTCYAN_EX}{Style.BRIGHT}[F]{Fore.WHITE}{Style.BRIGHT} ⚡ aiohttp Fast Harvester   {Fore.GREEN}[KENCANG]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}(Filter <350ms dalam 1 detik)
@@ -1127,8 +1203,8 @@ def show_interactive_menu():
   {Fore.YELLOW}{Style.BRIGHT}⭐ [MVP] S-TIER ARSENAL: RESIDENTIAL & CLOUDFLARE WARP
   {Fore.YELLOW}{Style.BRIGHT}[W]{Fore.WHITE}{Style.BRIGHT} 🏢 Webshare Hunter Elite   {st['webshare']} {Fore.YELLOW}(RESIDENTIAL MVP ⭐⭐⭐)
      {Fore.GREEN}└─ Audio Captcha Solver • Real Residential IPs • 10-30 Nodes/Acc
-  {Fore.MAGENTA}{Style.BRIGHT}[D]{Fore.WHITE}{Style.BRIGHT} 🦊 Decodo Residential Hunt {Fore.GREEN}[CAMOUFOX]{Style.RESET_ALL} {Fore.YELLOW}(AUTO CF MAIL & CC TRIAL)
-     {Fore.GREEN}└─ Camoufox Headless • Auto-Register & Verify • Claim Resi Trial HTTP
+  {Fore.MAGENTA}{Style.BRIGHT}[D]{Fore.WHITE}{Style.BRIGHT} 🦊 Decodo Residential Hunt {Fore.GREEN}[CLOAKBROWSER]{Style.RESET_ALL} {Fore.YELLOW}(AUTO CF MAIL & CC TRIAL)
+     {Fore.GREEN}└─ CloakBrowser Headless • Auto-Register & Verify • Claim Resi Trial HTTP
   {Fore.CYAN}{Style.BRIGHT}[C]{Fore.WHITE}{Style.BRIGHT} 🚀 Cloudflare WARP Local    {Fore.GREEN}[ULTRA FAST]{Style.RESET_ALL} {Fore.CYAN}(ZERO CAPTCHA, UNLIMITED)
      {Fore.GREEN}└─ Official WireGuard Profile • Mixed SOCKS5/HTTP • Latency <100ms
   {Fore.LIGHTCYAN_EX}{Style.BRIGHT}[F]{Fore.WHITE}{Style.BRIGHT} ⚡ aiohttp Fast Harvester   {Fore.GREEN}[FAST]{Style.RESET_ALL} {Fore.LIGHTBLACK_EX}(Sub-350ms filter in 1 second)
@@ -1348,8 +1424,8 @@ print("IP Aktif Residential:", resp.json()["ip"])
             try:
                 from core.decodo_hunter import run_decodo_hunter, get_decodo_headless_config
             except ImportError as e:
-                print(f"\n{Fore.RED}⚠️ Dependensi Camoufox / Decodo Hunter belum lengkap: {e}{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}👉 Jalankan: pip install camoufox && camoufox fetch{Style.RESET_ALL}\n")
+                print(f"\n{Fore.RED}⚠️ Dependensi CloakBrowser / Decodo Hunter belum lengkap: {e}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}👉 Jalankan: pip install cloakbrowser{Style.RESET_ALL}\n")
                 continue
 
             is_hl = get_decodo_headless_config()
@@ -1519,7 +1595,7 @@ def main():
     parser.add_argument("--max-latency", type=int, default=1200, help="Maximum latency in ms for fast harvester (default: 1200)")
     parser.add_argument("--daemon-gateway", "-G", action="store_true", help="Run 24/7 resilient local gateway on port 8888 with auto-healer")
     parser.add_argument("--webshare", "-W", type=int, nargs="?", const=1, default=None, help="Trigger Webshare Residential Hunter for N accounts (default: 1)")
-    parser.add_argument("--decodo", "-D", type=int, nargs="?", const=1, default=None, help="Trigger Decodo Residential Hunter for N accounts (Camoufox browser)")
+    parser.add_argument("--decodo", "-D", type=int, nargs="?", const=1, default=None, help="Trigger Decodo Residential Hunter for N accounts (CloakBrowser stealth Chromium)")
     parser.add_argument("--headless", action="store_true", help="Force headless mode (run browser in background)")
     parser.add_argument("--headful", action="store_true", help="Force headful mode (display browser GUI)")
     parser.add_argument("--health-check", "-H", nargs="?", const="auto", default=None, help="Check health of saved proxy file (.txt or .json)")
@@ -1610,8 +1686,8 @@ def main():
         try:
             from core.decodo_hunter import run_decodo_hunter
         except ImportError as e:
-            print(f"{Fore.RED}⚠️ Dependensi Camoufox / Decodo Hunter belum lengkap: {e}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Silakan jalankan: pip install camoufox && camoufox fetch{Style.RESET_ALL}\n")
+            print(f"{Fore.RED}⚠️ Dependensi CloakBrowser / Decodo Hunter belum lengkap: {e}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Silakan jalankan: pip install cloakbrowser{Style.RESET_ALL}\n")
             sys.exit(1)
 
         hl_override = True if args.headless else False if args.headful else None
