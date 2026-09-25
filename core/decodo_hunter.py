@@ -9,6 +9,7 @@ serta ekspor proxy HTTP & akun ke folder output.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import os
@@ -333,32 +334,28 @@ def generate_random_shipping_info() -> Dict[str, str]:
 
 def fill_shipping_address(page, addr: Dict[str, str], timeout: int = 15) -> bool:
     """
-    Mengisi seluruh bagian formulir 'Save shipping information' pada checkout Decodo secara instan.
-    Menunggu sampai elemen input alamat benar-benar muncul di DOM/frame, lalu langsung mengisi
-    seluruh field (Country -> US, Name, Street, Line2, City, State, ZIP) menggunakan Playwright native fill/select
-    tanpa jeda buatan agar state React/Stripe terupdate sempurna.
+    Mengisi seluruh bagian formulir 'Save shipping information' pada checkout Decodo.
+    1. Mengidentifikasi frame Stripe Address Element secara presisi (berbasis addressLine1).
+    2. Mengubah dropdown Negara (Country) -> US terlebih dahulu dengan multi-metode (klik interaktif, select, dan React setter).
+    3. Mengisi Full Name secara tangguh (click, fill, keyboard type, dan React native setter).
+    4. Mengisi Street, Line2, City, State, dan ZIP dengan timeout singkat dan perlindungan React.
     """
     started = time.time()
     shipping_target = None
-    name_loc = None
 
-    # 1. Tunggu sampai elemen input nama / alamat benar-benar muncul di page atau salah satu frame
+    # 1. Deteksi target frame yang memuat input baris alamat (hanya ada di Stripe Address Element)
     while time.time() - started < timeout:
-        targets = [page] + list(page.frames)
-        for t in targets:
+        for t in list(page.frames) + [page]:
             try:
                 for sel in [
-                    'input#Field-nameInput',
-                    'input[placeholder*="Full name" i]',
-                    'input[name="shippingAddress.name"]',
-                    'input[name="name"]',
                     'input#Field-addressLine1Input',
-                    'select#Field-countryInput',
+                    'input[placeholder*="Address line 1" i]',
+                    'input[name="shippingAddress.line1"]',
+                    'input[name="addressLine1"]'
                 ]:
                     loc = t.locator(sel)
                     if loc.count() > 0 and loc.first.is_visible():
                         shipping_target = t
-                        name_loc = loc.first
                         break
                 if shipping_target:
                     break
@@ -371,268 +368,410 @@ def fill_shipping_address(page, addr: Dict[str, str], timeout: int = 15) -> bool
     if not shipping_target:
         shipping_target = page
 
-    candidate_targets = [shipping_target] + [t for t in ([page] + list(page.frames)) if t != shipping_target]
+    # Target utama yang diprioritaskan, diikuti fallback target lainnya jika diperlukan
+    candidate_targets = [shipping_target]
+    for t in list(page.frames) + [page]:
+        if t != shipping_target and t not in candidate_targets:
+            candidate_targets.append(t)
 
     try:
+        target_country = addr.get("country_code", "US").upper()
+        target_country_name = addr.get("country", "United States")
+
         # 2. PILIH NEGARA (COUNTRY) -> 'United States' ('US')
-        country_selectors = [
-            'select#Field-countryInput',
-            'select[name="country"]',
-            'select[autocomplete="country"]',
-            'select[name="shippingAddress.country"]',
-            '#country'
-        ]
+        # Terapkan multi-strategi berbasis DOM selector-agnostic, leaf-node click, dan verifikasi State options
         country_changed = False
-        for t in candidate_targets:
+
+        # Strategi 1: Scan seluruh elemen <select> via JS tanpa mengasumsikan ID/name tertentu
+        for t in [shipping_target] + candidate_targets:
             try:
-                for c_sel in country_selectors:
-                    c_loc = t.locator(c_sel)
-                    if c_loc.count() > 0 and c_loc.first.is_visible():
+                res = t.evaluate("""(code) => {
+                    const allSelects = Array.from(document.querySelectorAll('select'));
+                    for (const sel of allSelects) {
+                        let usIdx = -1;
+                        if (!sel.options) continue;
+                        for (let i = 0; i < sel.options.length; i++) {
+                            const opt = sel.options[i];
+                            const val = (opt.value || '').toUpperCase();
+                            const txt = (opt.text || opt.innerText || '').toLowerCase();
+                            if (val === code.toUpperCase() || txt.includes('united states')) {
+                                usIdx = i;
+                                break;
+                            }
+                        }
+                        if (usIdx >= 0) {
+                            sel.focus();
+                            sel.selectedIndex = usIdx;
+                            const targetVal = sel.options[usIdx].value;
+                            const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+                            if (setter) {
+                                setter.call(sel, targetVal);
+                            } else {
+                                sel.value = targetVal;
+                            }
+                            const tracker = sel._valueTracker;
+                            if (tracker) {
+                                tracker.setValue('__force_diff__');
+                            }
+                            sel.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                            sel.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                            sel.dispatchEvent(new UIEvent('change', { bubbles: true, composed: true }));
+                            sel.blur();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""", target_country)
+                if res:
+                    country_changed = True
+                    break
+            except Exception:
+                pass
+
+        # Strategi 2: Playwright native select_option pada elemen select
+        for t in [shipping_target] + candidate_targets:
+            try:
+                c_sels = t.locator('select#Field-countryInput, select[name*="country" i], select[autocomplete*="country" i], select')
+                if c_sels.count() > 0:
+                    for s_idx in range(min(c_sels.count(), 3)):
+                        sel_elem = c_sels.nth(s_idx)
                         try:
-                            curr_val = c_loc.first.input_value()
+                            sel_elem.select_option(value=target_country, timeout=1000)
+                            country_changed = True
+                            break
                         except Exception:
-                            curr_val = ""
-                        if curr_val.upper() != addr["country_code"].upper():
                             try:
-                                c_loc.first.select_option(value=addr["country_code"])
+                                sel_elem.select_option(label=target_country_name, timeout=1000)
                                 country_changed = True
+                                break
                             except Exception:
-                                try:
-                                    c_loc.first.select_option(label=addr["country"])
-                                    country_changed = True
-                                except Exception:
-                                    pass
-                        break
+                                pass
                 if country_changed:
                     break
             except Exception:
                 pass
 
-        if not country_changed:
-            for t in candidate_targets:
-                try:
-                    combo = t.locator('[role="combobox"][aria-label*="Country" i], button[aria-haspopup="listbox"]:has-text("Country"), [data-testid*="country" i]')
-                    if combo.count() > 0 and combo.first.is_visible():
-                        combo.first.click()
-                        time.sleep(0.2)
-                        opt = t.locator(f'[role="option"]:has-text("{addr["country"]}"), option:has-text("{addr["country"]}")')
-                        if opt.count() > 0:
-                            opt.first.click()
+        # Strategi 3: Leaf-node click pada elemen teks 'Indonesia' (jika custom combobox / dropdown UI)
+        for t in [shipping_target] + candidate_targets:
+            try:
+                clicked = t.evaluate("""() => {
+                    const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
+                        if (['OPTION', 'SCRIPT', 'STYLE', 'HEAD', 'BODY', 'HTML'].includes(el.tagName)) return false;
+                        const txt = (el.innerText || el.value || '').trim();
+                        if (txt === 'Indonesia' || (txt.startsWith('Indonesia') && txt.length < 25)) {
+                            const hasMatchingChild = Array.from(el.children).some(child => {
+                                const ctxt = (child.innerText || child.value || '').trim();
+                                return ctxt === 'Indonesia' || (ctxt.startsWith('Indonesia') && ctxt.length < 25);
+                            });
+                            return !hasMatchingChild;
+                        }
+                        return false;
+                    });
+                    if (candidates.length > 0) {
+                        candidates[0].scrollIntoView({ block: 'center', inline: 'center' });
+                        candidates[0].click();
+                        return true;
+                    }
+                    return false;
+                }""")
+                if clicked:
+                    time.sleep(0.3)
+                    us_opts = t.locator(':is([role="option"], option, li, button, div, span):has-text("United States")')
+                    if us_opts.count() > 0:
+                        for u_idx in range(us_opts.count()):
+                            u_el = us_opts.nth(u_idx)
+                            if u_el.is_visible():
+                                u_el.click(force=True)
+                                country_changed = True
+                                time.sleep(0.3)
+                                break
+                    if not country_changed:
+                        srch = t.locator('input[placeholder*="Search" i], input[type="search"]')
+                        if srch.count() > 0 and srch.first.is_visible():
+                            srch.first.fill(target_country_name, timeout=800)
+                            time.sleep(0.2)
+                            t.keyboard.press("Enter")
                             country_changed = True
-                            break
-                except Exception:
-                    pass
+                    if country_changed:
+                        break
+            except Exception:
+                pass
 
-        # Jika negara baru saja diganti ke US, beri kesempatan Stripe me-render dropdown State (maks 1 detik)
-        if country_changed:
-            for _ in range(10):
-                time.sleep(0.1)
+        # Strategi 4: Autocomplete input jika country dirender sebagai input
+        if not country_changed:
+            for t in [shipping_target] + candidate_targets:
                 try:
-                    s_chk = shipping_target.locator('select#Field-administrativeAreaInput, select[name="administrativeArea"], select[autocomplete="address-level1"]')
-                    if s_chk.count() > 0 and s_chk.first.is_visible() and s_chk.first.locator('option').count() > 5:
+                    c_inp = t.locator('input#Field-countryInput, input[name*="country" i], input[placeholder*="Country" i], input[role="combobox"]')
+                    if c_inp.count() > 0 and c_inp.first.is_visible():
+                        c_inp.first.click(force=True)
+                        t.keyboard.press("Control+A")
+                        t.keyboard.press("Backspace")
+                        t.keyboard.type(target_country_name, delay=20)
+                        time.sleep(0.2)
+                        t.keyboard.press("Enter")
+                        country_changed = True
                         break
                 except Exception:
                     pass
+
+        # Verifikasi & Tunggu Stripe me-render ulang field alamat (State & ZIP US)
+        # Settle check: periksa opsi administrativeArea (apakah sudah memuat State US seperti California/Ohio/CA/OH)
+        for _ in range(20):
+            time.sleep(0.1)
+            try:
+                is_settled = shipping_target.evaluate("""() => {
+                    const adminSel = document.querySelector('select#Field-administrativeAreaInput') ||
+                                     document.querySelector('select[name="administrativeArea"]') ||
+                                     document.querySelector('select[name="state"]');
+                    if (adminSel && adminSel.options) {
+                        for (let i = 0; i < adminSel.options.length; i++) {
+                            const txt = (adminSel.options[i].text || '').toLowerCase();
+                            const val = (adminSel.options[i].value || '').toUpperCase();
+                            if (txt.includes('california') || txt.includes('ohio') || val === 'CA' || val === 'OH' || val === 'NY') {
+                                return true;
+                            }
+                        }
+                    }
+                    const cSel = document.querySelector('select#Field-countryInput');
+                    if (cSel && (cSel.value === 'US' || (cSel.selectedOptions && cSel.selectedOptions[0]?.value === 'US'))) {
+                        return true;
+                    }
+                    return false;
+                }""")
+                if is_settled:
+                    break
+            except Exception:
+                pass
 
         # 3. FULL NAME
-        name_selectors = [
-            'input#Field-nameInput',
-            'input[placeholder*="Full name" i]',
-            'input[placeholder*="Name" i]',
-            'input[name="shippingAddress.name"]',
-            'input[name="name"]',
-            'input[autocomplete="name"]',
-            '#name'
-        ]
+        # Isi langsung di shipping_target dengan click, fill, type, dan React native setter
         name_filled = False
-        for t in candidate_targets:
-            for sel in name_selectors:
-                try:
-                    loc = t.locator(sel)
-                    if loc.count() > 0 and loc.first.is_visible():
-                        loc.first.scroll_into_view_if_needed(timeout=500)
-                        loc.first.fill(addr["name"])
-                        name_filled = True
-                        break
-                except Exception:
-                    pass
-            if name_filled:
-                break
+        name_val = addr["name"]
+
+        for t in [shipping_target] + candidate_targets:
+            try:
+                name_loc = t.locator('input[placeholder*="Full name" i], input#Field-nameInput, input[name="shippingAddress.name"], input[autocomplete="name"]')
+                if name_loc.count() > 0 and name_loc.first.is_visible():
+                    name_loc.first.scroll_into_view_if_needed(timeout=500)
+                    name_loc.first.click(force=True)
+                    time.sleep(0.1)
+                    name_loc.first.fill(name_val, timeout=2000)
+
+                    # Jika value belum tercermin (React controlled component), gunakan keyboard typing
+                    try:
+                        curr_name = name_loc.first.input_value()
+                    except Exception:
+                        curr_name = ""
+                    if not curr_name:
+                        name_loc.first.click(force=True)
+                        t.keyboard.press("Control+A")
+                        t.keyboard.press("Backspace")
+                        t.keyboard.type(name_val, delay=15)
+                        try:
+                            curr_name = name_loc.first.input_value()
+                        except Exception:
+                            curr_name = ""
+
+                    # Gunakan React native setter untuk menjamin state React ter-update
+                    try:
+                        t.evaluate("""([val]) => {
+                            const el = document.querySelector('input[placeholder*="Full name" i]') || 
+                                       document.querySelector('input#Field-nameInput') || 
+                                       document.querySelector('input[name="shippingAddress.name"]');
+                            if (el) {
+                                el.focus();
+                                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                                if (setter) {
+                                    setter.call(el, val);
+                                } else {
+                                    el.value = val;
+                                }
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                                el.blur();
+                                return true;
+                            }
+                            return false;
+                        }""", [name_val])
+                    except Exception:
+                        pass
+
+                    name_filled = True
+                    break
+            except Exception:
+                pass
 
         # 4. STREET ADDRESS (ADDRESS LINE 1)
-        street_selectors = [
-            'input#Field-addressLine1Input',
-            'input[placeholder*="Address line 1" i]',
-            'input[placeholder*="Street address" i]',
-            'input[name="addressLine1"]',
-            'input[name="address"]',
-            'input[name="line1"]',
-            'input[name="streetAddress"]',
-            'input[name="shippingAddress.line1"]',
-            'input[autocomplete="address-line1"]'
-        ]
         street_filled = False
-        for t in candidate_targets:
-            for sel in street_selectors:
-                try:
-                    loc = t.locator(sel)
-                    if loc.count() > 0 and loc.first.is_visible():
-                        loc.first.scroll_into_view_if_needed(timeout=500)
-                        loc.first.fill(addr["street"])
-                        street_filled = True
-                        break
-                except Exception:
-                    pass
-            if street_filled:
-                break
+        for t in [shipping_target] + candidate_targets:
+            try:
+                st_loc = t.locator('input#Field-addressLine1Input, input[placeholder*="Address line 1" i], input[placeholder*="Street address" i], input[name="addressLine1"], input[name="shippingAddress.line1"]')
+                if st_loc.count() > 0 and st_loc.first.is_visible():
+                    st_loc.first.scroll_into_view_if_needed(timeout=500)
+                    st_loc.first.click(force=True)
+                    st_loc.first.fill(addr["street"], timeout=2000)
+                    street_filled = True
+                    break
+            except Exception:
+                pass
 
         # 5. ADDRESS LINE 2 (OPSIONAL)
         if addr.get("line2"):
-            line2_selectors = [
-                'input#Field-addressLine2Input',
-                'input[placeholder*="Address line 2" i]',
-                'input[name="addressLine2"]',
-                'input[name="address2"]',
-                'input[name="line2"]',
-                'input[autocomplete="address-line2"]'
-            ]
-            for t in candidate_targets:
-                for sel in line2_selectors:
-                    try:
-                        loc = t.locator(sel)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            loc.first.fill(addr["line2"])
-                            break
-                    except Exception:
-                        pass
+            for t in [shipping_target] + candidate_targets:
+                try:
+                    l2_loc = t.locator('input#Field-addressLine2Input, input[placeholder*="Address line 2" i], input[name="addressLine2"]')
+                    if l2_loc.count() > 0 and l2_loc.first.is_visible():
+                        l2_loc.first.fill(addr["line2"], timeout=2000)
+                        break
+                except Exception:
+                    pass
 
         # 6. CITY
-        city_selectors = [
-            'input#Field-localityInput',
-            'input[placeholder*="City" i]',
-            'input[name="locality"]',
-            'input[name="city"]',
-            'input[name="shippingAddress.city"]',
-            'input[autocomplete="address-level2"]'
-        ]
         city_filled = False
-        for t in candidate_targets:
-            for sel in city_selectors:
-                try:
-                    loc = t.locator(sel)
-                    if loc.count() > 0 and loc.first.is_visible():
-                        loc.first.scroll_into_view_if_needed(timeout=500)
-                        loc.first.fill(addr["city"])
-                        city_filled = True
-                        break
-                except Exception:
-                    pass
-            if city_filled:
-                break
+        for t in [shipping_target] + candidate_targets:
+            try:
+                ct_loc = t.locator('input#Field-localityInput, input[placeholder*="City" i], input[name="city"], input[name="shippingAddress.city"]')
+                if ct_loc.count() > 0 and ct_loc.first.is_visible():
+                    ct_loc.first.scroll_into_view_if_needed(timeout=500)
+                    ct_loc.first.click(force=True)
+                    ct_loc.first.fill(addr["city"], timeout=2000)
+                    city_filled = True
+                    break
+            except Exception:
+                pass
 
-        # 7. STATE / PROVINCE (Dropdown atau Input)
-        state_selectors = [
-            'select#Field-administrativeAreaInput',
-            'select[name="administrativeArea"]',
-            'select[autocomplete="address-level1"]',
-            'select[name="shippingAddress.state"]',
-            'select[name="state"]',
-            'select[name="province"]',
-            'select[id*="administrativeArea" i]'
-        ]
+        # 7. STATE / PROVINCE
         state_filled = False
-        for attempt in range(5):
-            for t in candidate_targets:
-                try:
-                    for s_sel in state_selectors:
-                        s_loc = t.locator(s_sel)
-                        if s_loc.count() > 0 and s_loc.first.is_visible():
-                            try:
-                                s_loc.first.select_option(value=addr["state_code"])
-                                state_filled = True
-                                break
-                            except Exception:
-                                try:
-                                    s_loc.first.select_option(label=addr["state"])
-                                    state_filled = True
-                                    break
-                                except Exception:
-                                    pass
-                    if state_filled:
-                        break
-                except Exception:
-                    pass
-            if state_filled:
-                break
-            time.sleep(0.1)
+        target_state_code = addr.get("state_code", "OH")
+        target_state_name = addr.get("state", "Ohio")
 
-        if not state_filled:
-            for t in candidate_targets:
-                for inp_sel in [
-                    'input#Field-administrativeAreaInput',
-                    'input[name="administrativeArea"]',
-                    'input[autocomplete="address-level1"]',
-                    'input[name="state"]',
-                    'input[placeholder*="State" i]',
-                    'input[placeholder*="Province" i]'
-                ]:
+        for t in [shipping_target] + candidate_targets:
+            try:
+                s_loc = t.locator('select#Field-administrativeAreaInput, select[name="administrativeArea"], select[name="shippingAddress.state"], select[name="state"], select[name="province"]')
+                if s_loc.count() > 0 and s_loc.first.is_visible():
                     try:
-                        loc = t.locator(inp_sel)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            loc.first.fill(addr["state"])
-                            state_filled = True
-                            break
+                        s_loc.first.select_option(value=target_state_code, timeout=1200)
+                        state_filled = True
                     except Exception:
-                        pass
+                        try:
+                            s_loc.first.select_option(label=target_state_name, timeout=1200)
+                            state_filled = True
+                        except Exception:
+                            pass
+
+                    # Fallback JS React setter untuk dropdown State / Province
+                    if not state_filled:
+                        try:
+                            res = t.evaluate("""([code, name]) => {
+                                const el = document.querySelector('select#Field-administrativeAreaInput') || 
+                                           document.querySelector('select[name="administrativeArea"]') ||
+                                           document.querySelector('select[name="province"]');
+                                if (!el || !el.options || el.options.length <= 1) return false;
+                                let chosenIdx = -1;
+                                for (let i = 0; i < el.options.length; i++) {
+                                    const opt = el.options[i];
+                                    if (opt.value.toUpperCase() === code.toUpperCase() || 
+                                        opt.text.toLowerCase().includes(name.toLowerCase())) {
+                                        chosenIdx = i;
+                                        break;
+                                    }
+                                }
+                                if (chosenIdx === -1 && el.options.length > 1) {
+                                    chosenIdx = 1; // Fallback ke opsi pertama jika mode dropdown non-US
+                                }
+                                if (chosenIdx >= 0) {
+                                    el.selectedIndex = chosenIdx;
+                                    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+                                    if (setter) {
+                                        setter.call(el, el.options[chosenIdx].value);
+                                    } else {
+                                        el.value = el.options[chosenIdx].value;
+                                    }
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    return true;
+                                }
+                                return false;
+                            }""", [target_state_code, target_state_name])
+                            if res:
+                                state_filled = True
+                        except Exception:
+                            pass
+
                 if state_filled:
                     break
+            except Exception:
+                pass
 
-        # 8. POSTAL CODE / ZIP
-        zip_selectors = [
-            'input#Field-postalCodeInput',
-            'input[placeholder*="Postal" i]',
-            'input[placeholder*="ZIP" i]',
-            'input[name="postalCode"]',
-            'input[name="postal_code"]',
-            'input[name="zip"]',
-            'input[autocomplete="postal-code"]'
-        ]
-        zip_filled = False
-        for t in candidate_targets:
-            for sel in zip_selectors:
+        # Fallback jika State berupa text input
+        if not state_filled:
+            for t in [shipping_target] + candidate_targets:
                 try:
-                    loc = t.locator(sel)
-                    if loc.count() > 0 and loc.first.is_visible():
-                        loc.first.scroll_into_view_if_needed(timeout=500)
-                        loc.first.fill(addr["zip"])
-                        zip_filled = True
+                    s_inp = t.locator('input#Field-administrativeAreaInput, input[name="administrativeArea"], input[placeholder*="State" i], input[placeholder*="Province" i]')
+                    if s_inp.count() > 0 and s_inp.first.is_visible():
+                        s_inp.first.fill(addr["state"], timeout=2000)
+                        state_filled = True
                         break
                 except Exception:
                     pass
-            if zip_filled:
-                break
+
+        # 8. POSTAL CODE / ZIP
+        zip_filled = False
+        target_zip = addr.get("zip", "43215")
+
+        for t in [shipping_target] + candidate_targets:
+            try:
+                z_loc = t.locator('input#Field-postalCodeInput, input[placeholder*="ZIP" i], input[placeholder*="Postal" i], input[name="postalCode"]')
+                if z_loc.count() > 0 and z_loc.first.is_visible():
+                    z_loc.first.scroll_into_view_if_needed(timeout=500)
+                    z_loc.first.click(force=True)
+                    z_loc.first.fill(target_zip, timeout=2000)
+                    zip_filled = True
+                    break
+            except Exception:
+                pass
+
+        # Fallback JS React setter untuk ZIP
+        if not zip_filled:
+            try:
+                res = shipping_target.evaluate("""(val) => {
+                    const el = document.querySelector('input#Field-postalCodeInput') ||
+                               document.querySelector('input[placeholder*="ZIP" i]') ||
+                               document.querySelector('input[placeholder*="Postal" i]');
+                    if (el) {
+                        el.focus();
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                        if (setter) {
+                            setter.call(el, val);
+                        } else {
+                            el.value = val;
+                        }
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.blur();
+                        return true;
+                    }
+                    return false;
+                }""", target_zip)
+                if res:
+                    zip_filled = True
+            except Exception:
+                pass
 
         # 9. PHONE (OPSIONAL)
         if addr.get("phone"):
-            for t in candidate_targets:
-                for sel in [
-                    'input#Field-phoneInput',
-                    'input[placeholder*="Phone" i]',
-                    'input[name="phone"]',
-                    'input[autocomplete="tel"]'
-                ]:
-                    try:
-                        loc = t.locator(sel)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            loc.first.fill(addr["phone"])
-                            break
-                    except Exception:
-                        pass
+            for t in [shipping_target] + candidate_targets:
+                try:
+                    p_loc = t.locator('input#Field-phoneInput, input[placeholder*="Phone" i], input[name="phone"]')
+                    if p_loc.count() > 0 and p_loc.first.is_visible():
+                        p_loc.first.fill(addr["phone"], timeout=2000)
+                        break
+                except Exception:
+                    pass
 
-        # Verifikasi: minimal Name dan Street berhasil diisi
         valid = bool(name_filled and street_filled)
         if not valid:
-            valid = bool(name_filled or street_filled or state_filled)
+            valid = bool(name_filled or street_filled or state_filled or city_filled)
         return valid
     except Exception as e:
         print(f"  {Fore.YELLOW}[!] Peringatan isi shipping address: {e}{Style.RESET_ALL}")
@@ -955,22 +1094,40 @@ def inject_hcaptcha_token(page, token: str) -> bool:
 # backend for numbered-grid picks, click those cells with real OS-level mouse events,
 # and let the REAL widget mint the token. Falls back to human solving in headful mode.
 
-_HCAP_GRID = 4
+_HCAP_GRID = 3
 
 _HCAP_META_JS = """() => {
-    const txt = document.body.innerText || '';
-    const lines = txt.split('\\n').filter(l => l.trim());
-    const task = lines.find(l =>
-        !l.includes('try again') && !l.match(/^(Skip|Verify|Next|EN)$/) && l.length > 5
-    ) || '';
-    const c = document.querySelector('canvas');
-    const hasDrag = /^drag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
-    const btn = document.querySelector('.button-submit');
+    const promptEl = document.querySelector('.prompt-text, .challenge-header, h2, .task-prompt');
+    let task = promptEl ? (promptEl.innerText || '').trim() : '';
+    if (!task) {
+        const txt = document.body.innerText || '';
+        const lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 5);
+        task = lines.find(l =>
+            !l.includes('try again') && !l.match(/^(Skip|Verify|Next|EN)$/i)
+        ) || '';
+    }
+    const taskImages = Array.from(document.querySelectorAll('.task-image, [aria-label*="Image"], .cell'));
+    const canvas = document.querySelector('canvas');
+    let gridCount = taskImages.length;
+    let gridDim = 3;
+    if (gridCount === 16) {
+        gridDim = 4;
+    } else if (gridCount === 9) {
+        gridDim = 3;
+    } else if (canvas) {
+        const hasDrag = /^drag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
+        gridDim = hasDrag ? 4 : 3;
+    }
+    const btn = document.querySelector('.button-submit, [data-cy="button-submit"], button[title*="Next"], button[title*="Verify"]');
+    const isDrag = /^drag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
     return {
         target: task,
-        hasCanvas: !!c,
-        isDrag: hasDrag,
-        buttonText: btn ? btn.innerText.trim() : '',
+        hasTiles: taskImages.length > 0,
+        hasCanvas: !!canvas,
+        tileCount: taskImages.length,
+        gridDim: gridDim,
+        isDrag: isDrag,
+        buttonText: btn ? (btn.innerText || '').trim() : '',
     };
 }"""
 
@@ -998,17 +1155,23 @@ def _hcap_meta(fr) -> Dict[str, Any]:
 
 
 def _hcap_canvas_b64(page) -> str:
-    """Base64 PNG of the challenge canvas, preferring the challenge frame.
-
-    The checkout page can host unrelated canvases (Stripe renders some), so we
-    try the challenge frame (and its children) FIRST, then fall back to any frame.
-    """
+    """Base64 PNG of the challenge grid, supporting both DOM image tiles and canvas."""
     fr = _find_hcaptcha_challenge_frame(page)
     ordered = []
     if fr:
         ordered += [fr, *fr.child_frames]
     ordered += [f for f in page.frames if f not in ordered]
     for f in ordered:
+        try:
+            # 1. Prioritaskan screenshot elemen grid tantangan (bekerja untuk DOM tiles .task-image maupun canvas)
+            for sel in ['.task-grid', '.challenge-view', '.challenge-container', 'canvas', 'body']:
+                loc = f.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    img_bytes = loc.first.screenshot(type="png", timeout=3000)
+                    if img_bytes and len(img_bytes) > 500:
+                        return base64.b64encode(img_bytes).decode("ascii")
+        except Exception:
+            pass
         try:
             b64 = f.evaluate(_HCAP_CANVAS_JS)
             if b64:
@@ -1019,19 +1182,22 @@ def _hcap_canvas_b64(page) -> str:
 
 
 def _hcap_canvas_box(page) -> Optional[Dict[str, float]]:
-    """Bounding box of the challenge canvas, preferring the challenge frame."""
+    """Bounding box of the challenge canvas or grid, preferring the challenge frame."""
     fr = _find_hcaptcha_challenge_frame(page)
     ordered = []
     if fr:
         ordered += [fr, *fr.child_frames]
     ordered += [f for f in page.frames if f not in ordered]
     for f in ordered:
-        try:
-            box = f.locator("canvas").first.bounding_box()
-            if box:
-                return box
-        except Exception:
-            continue
+        for sel in ["canvas", ".task-grid", ".challenge-view"]:
+            try:
+                loc = f.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    box = loc.first.bounding_box()
+                    if box:
+                        return box
+            except Exception:
+                continue
     return None
 
 
@@ -1057,11 +1223,27 @@ def _sidecar_grid_pick(solver_url: str, image_b64: str, target: str,
     return []
 
 
-def _hcap_click_cells(page, indices: List[int], grid: int = _HCAP_GRID) -> bool:
-    """Click grid cells on the real canvas via OS-level mouse events."""
+def _hcap_click_cells(page, indices: List[int], grid: int = 3) -> bool:
+    """Click grid cells on the real canvas or DOM .task-image tiles."""
+    fr = _find_hcaptcha_challenge_frame(page)
+    if fr:
+        # Cek jika ada elemen .task-image langsung di frame tantangan
+        try:
+            tiles = fr.locator('.task-image, [aria-label*="Image"]')
+            t_count = tiles.count()
+            if t_count > 0:
+                for idx in indices:
+                    if idx < t_count:
+                        tiles.nth(idx).click(force=True)
+                        time.sleep(0.3)
+                return True
+        except Exception:
+            pass
+
     box = _hcap_canvas_box(page)
     if not box:
         return False
+
     tw = box["width"] / grid
     th = box["height"] / grid
     for idx in indices:
@@ -1110,20 +1292,28 @@ def _hcap_click_submit(page) -> str:
     fr = _find_hcaptcha_challenge_frame(page)
     if not fr:
         return ""
-    try:
-        btn = fr.query_selector(".button-submit")
-        if btn:
-            text = (btn.inner_text() or "").strip()
-            btn.click(timeout=5000)
-            time.sleep(2)
-            return text
-    except Exception:
-        pass
+    for sel in [
+        ".button-submit",
+        "[data-cy='button-submit']",
+        "button:has-text('Verify')",
+        "button:has-text('Next')",
+        "button:has-text('Skip')",
+        ".button-submit.button-blue",
+    ]:
+        try:
+            btn = fr.locator(sel)
+            if btn.count() > 0 and btn.first.is_visible():
+                text = (btn.first.inner_text() or "").strip()
+                btn.first.click(force=True, timeout=5000)
+                time.sleep(1.5)
+                return text
+        except Exception:
+            pass
     return ""
 
 
 def solve_hcaptcha_challenge_in_page(page, solver_url: str,
-                                     max_pages: int = 3) -> bool:
+                                     max_pages: int = 5) -> bool:
     """Drive the live hCaptcha challenge to completion inside the real page.
 
     Uses the sidecar's vision backend for the numbered-grid pick but performs all
@@ -1133,56 +1323,62 @@ def solve_hcaptcha_challenge_in_page(page, solver_url: str,
     if not fr:
         return False
 
-    # The challenge UI animates in — wait for the canvas before reading it.
+    # The challenge UI animates in — wait for challenge elements (tiles, canvas, or prompt).
     meta = _hcap_meta(fr)
     deadline = time.time() + 15
-    while not meta.get("hasCanvas") and time.time() < deadline:
+    while not (meta.get("hasTiles") or meta.get("hasCanvas") or meta.get("target")) and time.time() < deadline:
         time.sleep(0.5)
         fr = _find_hcaptcha_challenge_frame(page) or fr
         meta = _hcap_meta(fr)
-    if not meta.get("hasCanvas"):
+    if not (meta.get("hasTiles") or meta.get("hasCanvas") or meta.get("target")):
         return False
 
     for page_num in range(1, max_pages + 1):
         fr = _find_hcaptcha_challenge_frame(page)
         if not fr:
-            break
+            return True
         meta = _hcap_meta(fr)
         btn_text = (meta.get("buttonText") or "").lower()
-        if btn_text in ("verify", "verifizieren", "verificar", "vahvista"):
+        if btn_text in ("verify", "verifizieren", "verificar", "vahvista") and not meta.get("hasTiles"):
             _hcap_click_submit(page)
-            return True
+            time.sleep(1.5)
+            if not _find_hcaptcha_challenge_frame(page):
+                return True
 
         target = meta.get("target") or ""
+        grid_dim = meta.get("gridDim") or 3
         mode = "drag" if meta.get("isDrag") else "click"
         b64 = _hcap_canvas_b64(page)
         if not b64:
             break
-        cells = _sidecar_grid_pick(solver_url, b64, target, mode=mode, timeout=45)
-        print(f"  {Fore.CYAN}[*] hCaptcha in-page (hal {page_num}): target={target[:45]!r} cells={cells}{Style.RESET_ALL}")
+        cells = _sidecar_grid_pick(solver_url, b64, target, mode=mode, grid=grid_dim, timeout=45)
+        print(f"  {Fore.CYAN}[*] hCaptcha in-page (hal {page_num}): target={target[:45]!r} (grid {grid_dim}x{grid_dim}) cells={cells}{Style.RESET_ALL}")
 
         if mode == "drag" and len(cells) >= 2:
-            _hcap_drag_cells(page, cells[0], cells[1])
+            _hcap_drag_cells(page, cells[0], cells[1], grid=grid_dim)
         elif cells:
-            _hcap_click_cells(page, cells)
+            _hcap_click_cells(page, cells, grid=grid_dim)
         else:
-            # No confident pick — click the first row as a weak guess rather than stalling.
-            _hcap_click_cells(page, list(range(_HCAP_GRID)))
+            # Tidak ada sel yang cocok atau ragu — klik baris pertama jika canvas drag
+            if mode == "drag":
+                _hcap_click_cells(page, list(range(grid_dim)), grid=grid_dim)
 
-        time.sleep(1.5)
-        clicked = _hcap_click_submit(page)
-        if btn_text in ("skip", "跳过", "huppel", "ohita", "überspringen"):
-            return False
-        if not clicked and not _find_hcaptcha_challenge_frame(page):
-            break
-        time.sleep(1.5)
+        time.sleep(1.0)
+        clicked_txt = _hcap_click_submit(page)
+        time.sleep(2.0)
+
+        # Cek apakah challenge frame sudah tertutup (sukses)
+        if not _find_hcaptcha_challenge_frame(page):
+            print(f"  {Fore.GREEN}✓ Challenge hCaptcha berhasil terselesaikan dan tertutup!{Style.RESET_ALL}")
+            return True
 
     fr = _find_hcaptcha_challenge_frame(page)
     if fr:
         meta = _hcap_meta(fr)
-        if (meta.get("buttonText") or "").lower() == "verify":
+        if (meta.get("buttonText") or "").lower() in ("verify", "verifizieren", "verificar", "next"):
             _hcap_click_submit(page)
-    return True
+            time.sleep(2.0)
+    return not bool(_find_hcaptcha_challenge_frame(page))
 
 
 def handle_hcaptcha_checkout_challenge(
@@ -1347,8 +1543,7 @@ def handle_hcaptcha_checkout_challenge(
 
         # Deteksi apakah hCaptcha menampilkan puzzle gambar visual
         has_challenge = any("frame=challenge" in (f.url or "") for f in page.frames)
-        if has_challenge and not has_prompted_challenge:
-            has_prompted_challenge = True
+        if has_challenge:
             solved_inpage = False
             # Coba selesaikan OTOMATIS di dalam halaman asli (token di-mint widget asli,
             # sehingga lolos binding rqdata/sesi enterprise). Jika gagal, baru minta manusia.
@@ -1368,7 +1563,8 @@ def handle_hcaptcha_checkout_challenge(
                         solved_inpage = True
                         break
 
-            if not solved_inpage:
+            if not solved_inpage and not has_prompted_challenge:
+                has_prompted_challenge = True
                 print(f"\n  {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
                 print(f"  {Fore.YELLOW}{Style.BRIGHT}⚠️ HCAPTCHA CHALLENGE TERDETEKSI DI BROWSER!{Style.RESET_ALL}")
                 print(f"  {Fore.CYAN}👉 Silakan selesaikan puzzle gambar hCaptcha di jendela browser yang terbuka.{Style.RESET_ALL}")
@@ -1770,9 +1966,9 @@ def fill_card_in_page_or_frames(page, card: Dict[str, str]) -> bool:
 
     targets = [page] + list(page.frames)
 
-    # Scroll sedikit ke bawah agar area pembayaran dan tombol Save tampak
+    # Scroll ke bawah agar area pembayaran dan tombol Save tampak
     try:
-        page.evaluate("window.scrollBy(0, 300)")
+        page.evaluate("window.scrollBy(0, 500)")
     except Exception:
         pass
 
@@ -2701,17 +2897,17 @@ def hunt_single_decodo(
 
                     time.sleep(1)
 
-                    # 3. Klik tombol 'Save'
+                    # 3. Klik tombol 'Save' / 'Start trial'
                     save_btn = None
                     for t in [page] + list(page.frames):
                         try:
-                            s = t.locator('button:has-text("Save"), button:has-text("Save payment information"), button[type="submit"]')
+                            s = t.locator('button:has-text("Save"), button:has-text("Save payment information"), button:has-text("Save shipping information"), button:has-text("Start free trial"), button:has-text("Start trial"), button:has-text("Continue"), button:has-text("Subscribe"), button[type="submit"], button.SubmitButton')
                             if s.count() > 0:
                                 for idx in range(s.count()):
                                     candidate = s.nth(idx)
                                     if candidate.is_visible():
                                         txt = (candidate.inner_text() or "").strip().lower()
-                                        if "save" in txt or candidate.get_attribute("type") == "submit":
+                                        if any(k in txt for k in ["save", "start", "continue", "subscribe", "pay"]) or candidate.get_attribute("type") == "submit":
                                             save_btn = candidate
                                             break
                             if save_btn:
