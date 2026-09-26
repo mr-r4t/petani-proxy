@@ -214,24 +214,85 @@ def format_proxy_string(proxy_dict: Dict[str, Any]) -> Optional[str]:
 
 
 def load_proxy_pool(filepath: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Muat daftar proxy dari proxies.txt di root project dan parse untuk Camoufox."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    target_path = filepath or os.path.join(base_dir, "proxies.txt")
-
-    if not os.path.exists(target_path):
+    """Muat daftar proxy dari sebuah file dan parse untuk Camoufox."""
+    if not filepath or not os.path.exists(filepath):
         return []
 
     valid_proxies = []
     try:
-        with open(target_path, "r", encoding="utf-8") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
                 parsed = parse_proxy_for_camoufox(line)
                 if parsed:
                     valid_proxies.append(parsed)
     except Exception as e:
-        print(f"{Fore.RED}[!] Gagal membaca {target_path}: {e}{Style.RESET_ALL}")
+        print(f"{Fore.RED}[!] Gagal membaca {filepath}: {e}{Style.RESET_ALL}")
 
     return valid_proxies
+
+
+# File proxy kandidat di folder output/ (skip file akun hasil panen).
+# live_elite.txt & decodo_residential.txt = proxy Decodo hasil panen sebelumnya,
+# webshare_residential.txt & proxyscrape_premium_http_proxies.txt = proxy pihak ketiga.
+DECODO_PROXY_POOL_FILES = [
+    "live_elite.txt",
+    "decodo_residential.txt",
+    "webshare_residential.txt",
+    "proxyscrape_premium_http_proxies.txt",
+]
+
+
+def select_proxy_pool_files(out_dir: str) -> List[str]:
+    """
+    Prompt interaktif: tampilkan daftar file proxy di folder output/ lalu suruh
+    user memilih file mana (atau semua) yang dipakai sebagai pool proxy hunter.
+    Mengembalikan daftar path absolut file terpilih (kosong = batal).
+    """
+    candidates: List[Dict[str, Any]] = []
+    for fname in DECODO_PROXY_POOL_FILES:
+        fpath = os.path.join(out_dir, fname)
+        if os.path.isfile(fpath):
+            candidates.append({"name": fname, "path": fpath, "count": len(load_proxy_pool(fpath))})
+
+    if not candidates:
+        return []
+
+    print(f"\n{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+    print(f"{Fore.WHITE}{Style.BRIGHT}📂 SUMBER PROXY — FOLDER output/ {Fore.CYAN}(pilih file yang dipakai){Style.RESET_ALL}")
+    for idx, c in enumerate(candidates, 1):
+        status = f"{Fore.GREEN}{c['count']} proxy ✓" if c["count"] > 0 else f"{Fore.RED}kosong ✗"
+        print(f"  {Fore.GREEN}[{idx}]{Fore.WHITE} 📄 {c['name']:45s} {status}{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}[A]{Fore.WHITE} 🔀 Gabungkan SEMUA file di atas")
+    print(f"  {Fore.RED}[0]{Fore.WHITE} 🔙 Batal (kembali / keluar)")
+    print(f"{Fore.CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+
+    while True:
+        sel = input(f"{Fore.YELLOW}Pilih sumber proxy {f'[1-{len(candidates)}, A, 0]'}: {Style.RESET_ALL}").strip().lower()
+        if sel == "0":
+            return []
+        if sel == "a":
+            return [c["path"] for c in candidates if c["count"] > 0]
+        if sel.isdigit() and 1 <= int(sel) <= len(candidates):
+            chosen = candidates[int(sel) - 1]
+            if chosen["count"] == 0:
+                print(f"{Fore.RED}[!] File '{chosen['name']}' kosong / tidak berisi proxy valid. Pilih file lain.{Style.RESET_ALL}")
+                continue
+            return [chosen["path"]]
+        print(f"{Fore.RED}[!] Pilihan tidak valid, coba lagi.{Style.RESET_ALL}")
+
+
+def load_merged_proxy_pool(filepaths: List[str]) -> List[Dict[str, Any]]:
+    """Muat & gabungkan proxy dari beberapa file (dedup pakai server+username)."""
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for fp in filepaths:
+        for p in load_proxy_pool(fp):
+            key = (p.get("server"), p.get("username"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(p)
+    return merged
 
 
 def load_decodo_settings() -> Dict[str, Any]:
@@ -3206,14 +3267,25 @@ def run_decodo_hunter(
 
     is_headless = get_decodo_headless_config(headless)
 
-    proxy_pool = load_proxy_pool()
+    # Sumber proxy: file di folder output/ (live_elite.txt, decodo_residential.txt,
+    # webshare_residential.txt, proxyscrape_premium_http_proxies.txt) — dipilih user
+    # saat runtime. proxies.txt di root TIDAK lagi dipakai oleh hunter Decodo.
+    pool_files = select_proxy_pool_files(out_dir)
+    if not pool_files:
+        print(f"\n{Fore.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
+        print(f"{Fore.RED}{Style.BRIGHT}❌ REGISTRASI DECODO WAJIB MENGGUNAKAN PROXY!{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}• Tidak ada file sumber proxy yang dipilih / berisi proxy yang valid di folder output/.{Style.RESET_ALL}")
+        print(f"{Fore.WHITE}• File kandidat: {Fore.CYAN}{', '.join(DECODO_PROXY_POOL_FILES)}{Style.RESET_ALL}")
+        print(f"{Fore.WHITE}• Format didukung: http://user:pass@ip:port, socks5://..., ip:port:user:pass, ip:port{Style.RESET_ALL}")
+        print(f"{Fore.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}\n")
+        return []
+
+    proxy_pool = load_merged_proxy_pool(pool_files)
     if not proxy_pool:
         print(f"\n{Fore.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
         print(f"{Fore.RED}{Style.BRIGHT}❌ REGISTRASI DECODO WAJIB MENGGUNAKAN PROXY!{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}• File 'proxies.txt' kosong atau belum diisi proxy yang valid.{Style.RESET_ALL}")
-        print(f"{Fore.WHITE}• Silakan tambahkan minimal 1 proxy ke file: {Fore.CYAN}proxies.txt{Style.RESET_ALL}")
-        print(f"{Fore.WHITE}• Format contoh dapat dilihat pada: {Fore.CYAN}proxies.example.txt{Style.RESET_ALL}")
-        print(f"{Fore.LIGHTBLACK_EX}  Format didukung: http://user:pass@ip:port, socks5://..., ip:port:user:pass, ip:port{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}• File terpilih tidak berisi proxy yang valid: {Fore.CYAN}{', '.join(os.path.basename(p) for p in pool_files)}{Style.RESET_ALL}")
+        print(f"{Fore.WHITE}• Format didukung: http://user:pass@ip:port, socks5://..., ip:port:user:pass, ip:port{Style.RESET_ALL}")
         print(f"{Fore.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}\n")
         return []
 
@@ -3234,7 +3306,7 @@ def run_decodo_hunter(
     print(f"{Fore.GREEN}{Style.BRIGHT}🌾 PETANIPROXY x DECODO RESIDENTIAL HUNTER (CLOAKBROWSER){Style.RESET_ALL}")
     print(f"  • Target Akun       : {Fore.YELLOW}{total}{Style.RESET_ALL} Akun")
     print(f"  • Engine Browser    : CloakBrowser Stealth Anti-Detect Chromium ({mode_label})")
-    print(f"  • Pool Proxy        : {Fore.GREEN}{len(proxy_pool)} Proxy Aktif di proxies.txt ✓{Style.RESET_ALL}")
+    print(f"  • Pool Proxy        : {Fore.GREEN}{len(proxy_pool)} Proxy Aktif ({', '.join(os.path.basename(p) for p in pool_files)}) ✓{Style.RESET_ALL}")
     print(f"  • Verifikasi Email  : {cf_status_str}")
     print(f"  • Data Kartu Kredit : {card_status_str}")
     print(f"  • BansosRouter SQLite: {Fore.WHITE}{db_path or 'Tidak Terdeteksi (Skip)'}{Style.RESET_ALL}")
