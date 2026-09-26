@@ -222,38 +222,97 @@ class TestDecodoProxyParser(unittest.TestCase):
         self.assertTrue(mock_page.evaluate.called)
         self.assertTrue(mock_frame.evaluate.called)
 
-    def test_handle_hcaptcha_checkout_challenge_success(self):
+    def test_handle_hcaptcha_checkout_challenge_inpage_primary(self):
+        """Checkout Decodo memakai hCaptcha enterprise: jalur utama = klik checkbox
+        ASLI lalu selesaikan challenge di halaman (token di-mint widget asli)."""
         from unittest.mock import MagicMock
         from core.decodo_hunter import handle_hcaptcha_checkout_challenge
 
         mock_page = MagicMock()
-        mock_page.url = "https://dashboard.decodo.com"
+        mock_page.url = "https://dashboard.decodo.com/checkout"
+
+        # Konfirmasi baru muncul SETELAH challenge diselesaikan in-page.
+        state = {"solved": False}
         mock_body = MagicMock()
-        # Returns successful message on check
-        mock_body.inner_text.side_effect = [
-            "Select the checkbox below",
-            "Your purchase was successful! Begin proxy setup"
-        ]
+
+        def body_text():
+            if state["solved"]:
+                return "Your purchase was successful! Begin proxy setup"
+            return "One more step before you're done. Select the checkbox below"
+
+        mock_body.inner_text.side_effect = body_text
         mock_page.locator.return_value = mock_body
 
-        mock_frame = MagicMock()
-        mock_frame.url = "https://newassets.hcaptcha.com/captcha/v1/static/hcaptcha.html#frame=checkbox&sitekey=10000000-ffff-ffff-ffff-000000000001"
-        mock_frame.evaluate.return_value = True
+        # Frame checkbox asli + frame challenge.
+        mock_cb_frame = MagicMock()
+        mock_cb_frame.url = "https://newassets.hcaptcha.com/captcha/v1/static/hcaptcha.html#frame=checkbox&sitekey=10000000-ffff-ffff-ffff-000000000001"
+        mock_cb_frame.evaluate.return_value = True
         mock_cb = MagicMock()
         mock_cb.count.return_value = 1
         mock_cb.first.is_visible.return_value = True
         mock_cb.first.bounding_box.return_value = {"x": 10, "y": 10, "width": 20, "height": 20}
-        mock_frame.locator.return_value = mock_cb
-        mock_fr_el = MagicMock()
-        mock_fr_el.bounding_box.return_value = {"x": 100, "y": 200, "width": 300, "height": 80}
-        mock_frame.frame_element.return_value = mock_fr_el
+        mock_cb_frame.locator.return_value = mock_cb
 
-        mock_page.frames = [mock_frame]
+        mock_ch_frame = MagicMock()
+        mock_ch_frame.url = "https://newassets.hcaptcha.com/captcha/v1/static/hcaptcha.html#frame=challenge&sitekey=10000000-ffff-ffff-ffff-000000000001"
+        mock_ch_frame.evaluate.return_value = True
 
-        with patch("core.decodo_hunter.check_sidecar_health", return_value=True), \
-             patch("core.decodo_hunter.solve_hcaptcha_via_sidecar", return_value="mock_token"):
+        mock_page.frames = [mock_cb_frame, mock_ch_frame]
+
+        def fake_inpage_solve(page, solver_url, max_pages=5):
+            state["solved"] = True
+            return True
+
+        with patch("core.decodo_hunter.solve_hcaptcha_challenge_in_page", side_effect=fake_inpage_solve) as mock_solve:
             res = handle_hcaptcha_checkout_challenge(mock_page, {}, solver_url="http://127.0.0.1:8877", timeout=5)
             self.assertTrue(res)
+            self.assertTrue(mock_solve.called, "Jalur utama harus menyelesaikan challenge in-page")
+            self.assertTrue(mock_page.mouse.click.called, "Checkbox hCaptcha harus diklik via mouse humanized (page.mouse.click)")
+            self.assertTrue(mock_cb.first.bounding_box.called, "Bounding box checkbox harus dibaca untuk gerakan mouse")
+
+    def test_handle_hcaptcha_checkout_challenge_sidecar_fallback(self):
+        """Bila jalur in-page gagal, token sidecar dipakai sebagai cadangan."""
+        from unittest.mock import MagicMock
+        from core.decodo_hunter import handle_hcaptcha_checkout_challenge
+
+        mock_page = MagicMock()
+        mock_page.url = "https://dashboard.decodo.com/checkout"
+        mock_page.evaluate.return_value = True
+
+        state = {"confirmed": False}
+        mock_body = MagicMock()
+
+        def body_text():
+            if state["confirmed"]:
+                return "Your purchase was successful! Begin proxy setup"
+            return "One more step before you're done. Select the checkbox below"
+
+        mock_body.inner_text.side_effect = body_text
+        mock_page.locator.return_value = mock_body
+
+        mock_cb_frame = MagicMock()
+        mock_cb_frame.url = "https://newassets.hcaptcha.com/captcha/v1/static/hcaptcha.html#frame=checkbox&sitekey=10000000-ffff-ffff-ffff-000000000001"
+        mock_cb_frame.evaluate.return_value = True
+        mock_cb = MagicMock()
+        mock_cb.count.return_value = 1
+        mock_cb.first.is_visible.return_value = True
+        mock_cb.first.bounding_box.return_value = {"x": 10, "y": 10, "width": 20, "height": 20}
+        mock_cb_frame.locator.return_value = mock_cb
+
+        mock_page.frames = [mock_cb_frame]
+
+        def fake_sidecar_token(*args, **kwargs):
+            # Token diterima backend -> tandai terkonfirmasi agar loop berhenti sukses.
+            state["confirmed"] = True
+            return "mock_token"
+
+        with patch("core.decodo_hunter.solve_hcaptcha_challenge_in_page", return_value=False), \
+             patch("core.decodo_hunter._wait_for_hcaptcha_challenge", return_value=False), \
+             patch("core.decodo_hunter.check_sidecar_health", return_value=True), \
+             patch("core.decodo_hunter.solve_hcaptcha_via_sidecar", side_effect=fake_sidecar_token) as mock_sidecar:
+            res = handle_hcaptcha_checkout_challenge(mock_page, {}, solver_url="http://127.0.0.1:8877", timeout=5)
+            self.assertTrue(res)
+            self.assertTrue(mock_sidecar.called, "Jalur cadangan sidecar harus dicoba")
 
     def test_select_http_protocol(self):
         from unittest.mock import MagicMock

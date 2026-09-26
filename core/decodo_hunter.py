@@ -1014,10 +1014,17 @@ def solve_hcaptcha_via_sidecar(
     return None
 
 
-def inject_hcaptcha_token(page, token: str) -> bool:
-    """Injeksi token hasil solver ke dalam elemen respons hCaptcha di DOM, trigger callback, dan kirim postMessage ke semua frames."""
+def inject_hcaptcha_token(page, token: str, include_hcaptcha_frames: bool = False) -> bool:
+    """Injeksi token hasil solver ke dalam elemen respons hCaptcha di DOM, trigger callback, dan kirim postMessage.
+
+    `include_hcaptcha_frames=False` (default) melewatkan frame internal hCaptcha
+    (newassets.hcaptcha.com/...). Mem-patch `window.hcaptcha.getResponse` di frame
+    internal dapat MERUSAK state widget asli (modal menggantung di 'Processing'),
+    jadi default-nya hanya halaman pemanggil + frame non-hCaptcha yang diinjeksi.
+    """
     injected_any = False
-    targets = [page] + list(page.frames)
+    targets = [page] + [f for f in page.frames
+                        if include_hcaptcha_frames or "hcaptcha.com" not in (f.url or "")]
     for target in targets:
         try:
             inj = target.evaluate('''(token) => {
@@ -1115,11 +1122,11 @@ _HCAP_META_JS = """() => {
     } else if (gridCount === 9) {
         gridDim = 3;
     } else if (canvas) {
-        const hasDrag = /^drag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
+        const hasDrag = /\\bdrag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
         gridDim = hasDrag ? 4 : 3;
     }
     const btn = document.querySelector('.button-submit, [data-cy="button-submit"], button[title*="Next"], button[title*="Verify"]');
-    const isDrag = /^drag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
+    const isDrag = /\\bdrag\\b/i.test(task) || /help the (creature|monkey|robot|character)/i.test(task);
     return {
         target: task,
         hasTiles: taskImages.length > 0,
@@ -1150,8 +1157,8 @@ def _find_hcaptcha_challenge_frame(page):
 def _hcap_meta(fr) -> Dict[str, Any]:
     try:
         return fr.evaluate(_HCAP_META_JS) or {}
-    except Exception:
-        return {}
+    except Exception as e:
+        return {"_error": str(e)[:120]}
 
 
 def _hcap_canvas_b64(page) -> str:
@@ -1203,20 +1210,30 @@ def _hcap_canvas_box(page) -> Optional[Dict[str, float]]:
 
 def _sidecar_grid_pick(solver_url: str, image_b64: str, target: str,
                        mode: str = "click", grid: int = _HCAP_GRID,
-                       timeout: int = 60) -> List[int]:
-    """Ask the sidecar's vision backend which numbered-grid cells satisfy the task."""
+                       timeout: int = 120) -> List[int]:
+    """Ask the sidecar's vision backend which numbered-grid cells satisfy the task.
+
+    The sidecar escalates through its vision-model chain when the fast model
+    answers with empty content on hard reasoning puzzles, so a single call can
+    take ~60s+; the generous timeout lets that escalation finish instead of
+    aborting to zero cells (which used to stall the challenge).
+    """
     try:
         endpoint = f"{solver_url.rstrip('/')}/hcaptcha/grid_pick"
         payload = {"image_b64": image_b64, "target": target or "",
                    "grid": grid, "mode": mode}
         resp = requests.post(endpoint, json=payload, timeout=timeout)
         if resp.status_code == 200:
+            data = resp.json()
             out = []
-            for c in (resp.json().get("cells") or []):
+            for c in (data.get("cells") or []):
                 try:
                     out.append(int(c))
                 except (TypeError, ValueError):
                     continue
+            if not out:
+                raw = (data.get("raw") or "").replace("\n", " ")[:120]
+                print(f"  {Fore.LIGHTBLACK_EX}Info grid_pick: 0 cells (raw={raw!r}){Style.RESET_ALL}")
             return out
     except Exception as e:
         print(f"  {Fore.LIGHTBLACK_EX}Info grid_pick: {e}{Style.RESET_ALL}")
@@ -1287,6 +1304,23 @@ def _hcap_drag_cells(page, src: int, tgt: int, grid: int = _HCAP_GRID) -> bool:
         return False
 
 
+def _hcap_click_refresh(page) -> bool:
+    """Klik ikon refresh pada header challenge hCaptcha (minta challenge baru)."""
+    fr = _find_hcaptcha_challenge_frame(page)
+    if not fr:
+        return False
+    for sel in [".refresh", "[aria-label*='refresh']", "[aria-label*='Refresh']", ".refresh-plural"]:
+        try:
+            loc = fr.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible():
+                loc.first.click(force=True, timeout=3000)
+                time.sleep(1.5)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _hcap_click_submit(page) -> str:
     """Click the challenge's submit button (Skip/Next/Verify). Returns its text."""
     fr = _find_hcaptcha_challenge_frame(page)
@@ -1313,7 +1347,7 @@ def _hcap_click_submit(page) -> str:
 
 
 def solve_hcaptcha_challenge_in_page(page, solver_url: str,
-                                     max_pages: int = 5) -> bool:
+                                     max_pages: int = 8) -> bool:
     """Drive the live hCaptcha challenge to completion inside the real page.
 
     Uses the sidecar's vision backend for the numbered-grid pick but performs all
@@ -1321,17 +1355,63 @@ def solve_hcaptcha_challenge_in_page(page, solver_url: str,
     """
     fr = _find_hcaptcha_challenge_frame(page)
     if not fr:
+        # Challenge biasanya muncul beberapa detik setelah checkbox diklik; beri waktu.
+        for _ in range(24):
+            time.sleep(0.5)
+            fr = _find_hcaptcha_challenge_frame(page)
+            if fr:
+                break
+    if not fr:
+        print(f"  {Fore.LIGHTBLACK_EX}[diag] solve_in_page: frame challenge tidak ditemukan (tunggu 12s). Frames: {[f.url[:70] for f in page.frames if 'hcaptcha' in (f.url or '').lower()][:4]}{Style.RESET_ALL}")
         return False
 
-    # The challenge UI animates in — wait for challenge elements (tiles, canvas, or prompt).
+    # The challenge UI animates in — wait for challenge elements (tiles, canvas,
+    # prompt) ATAU state verifikasi pasif (hanya tombol 'Verify' tanpa gambar —
+    # terjadi saat IP dipercaya dan hCaptcha tidak butuh puzzle).
+    def _meta_ready(m: Dict[str, Any]) -> bool:
+        if m.get("hasTiles") or m.get("hasCanvas") or m.get("target"):
+            return True
+        return (m.get("buttonText") or "").lower() in ("verify", "verifizieren", "verificar", "vahvista")
+
     meta = _hcap_meta(fr)
     deadline = time.time() + 15
-    while not (meta.get("hasTiles") or meta.get("hasCanvas") or meta.get("target")) and time.time() < deadline:
+    while not _meta_ready(meta) and time.time() < deadline:
         time.sleep(0.5)
         fr = _find_hcaptcha_challenge_frame(page) or fr
         meta = _hcap_meta(fr)
-    if not (meta.get("hasTiles") or meta.get("hasCanvas") or meta.get("target")):
+    if not _meta_ready(meta):
+        print(f"  {Fore.LIGHTBLACK_EX}[diag] solve_in_page: meta challenge kosong setelah 15s → {meta}{Style.RESET_ALL}")
         return False
+    print(f"  {Fore.LIGHTBLACK_EX}[diag] solve_in_page: meta siap → {meta}{Style.RESET_ALL}")
+
+    # ── Dump bukti visual untuk state ambigu (tanpa prompt/tiles/canvas) ──
+    # State 'Verify' tanpa konten belum diketahui bentuknya — simpan screenshot,
+    # URL frame, teks terlihat, dan HTML agar bisa didiagnosis dari run berikutnya.
+    if not (meta.get("hasTiles") or meta.get("hasCanvas") or meta.get("target")):
+        try:
+            import os as _os
+            _dump_dir = _os.path.join("output", "_hcap_state")
+            _os.makedirs(_dump_dir, exist_ok=True)
+            _ts = time.strftime("%H%M%S")
+            _shot = _os.path.join(_dump_dir, f"state_{_ts}.png")
+            page.screenshot(path=_shot)
+            with open(_os.path.join(_dump_dir, f"state_{_ts}.txt"), "w", encoding="utf-8") as fh:
+                fh.write(f"frame_url: {fr.url}\n\n--- inner_text ---\n")
+                try:
+                    fh.write((fr.evaluate("document.body ? document.body.innerText : ''") or "")[:2000])
+                except Exception as e:
+                    fh.write(f"(inner_text error: {e})")
+                fh.write("\n\n--- outerHTML (3000 chars) ---\n")
+                try:
+                    fh.write((fr.evaluate("document.documentElement.outerHTML") or "")[:3000])
+                except Exception as e:
+                    fh.write(f"(outerHTML error: {e})")
+            print(f"  {Fore.LIGHTBLACK_EX}[diag] state ambigu (Verify tanpa konten) — bukti disimpan ke output/_hcap_state/state_{_ts}.png/.txt{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"  {Fore.LIGHTBLACK_EX}[diag] dump state gagal: {e}{Style.RESET_ALL}")
+
+    _TRY_AGAIN_RE = re.compile(r"coba lagi|try again|silakan ulangi|please retry", re.I)
+    _refresh_tries = 0
 
     for page_num in range(1, max_pages + 1):
         fr = _find_hcaptcha_challenge_frame(page)
@@ -1339,29 +1419,66 @@ def solve_hcaptcha_challenge_in_page(page, solver_url: str,
             return True
         meta = _hcap_meta(fr)
         btn_text = (meta.get("buttonText") or "").lower()
+
+        # ── Deteksi state error hCaptcha ('Silakan coba lagi' / 'Please try again') ──
+        # Tidak ada tiles/canvas — ini BUKAN puzzle, melainkan penolakan sesi.
+        # Teks bisa muncul di .prompt-text (target) ATAU elemen lain (inner_text) —
+        # coba keduanya. Klik refresh untuk minta challenge baru; jangan buang vision.
+        target = meta.get("target") or ""
+        if not target and not meta.get("hasTiles") and not meta.get("hasCanvas"):
+            try:
+                target = (fr.evaluate("document.body ? document.body.innerText : ''") or "").strip()
+            except Exception:
+                target = ""
+        if _TRY_AGAIN_RE.search(target) and not meta.get("hasTiles") and not meta.get("hasCanvas"):
+            _refresh_tries += 1
+            if _refresh_tries > 3:
+                print(f"  {Fore.YELLOW}[!] hCaptcha terus menolak sesi ('{target.strip()[:40]}') — IP/proxy kemungkinan ditandai. Berhenti di sini.{Style.RESET_ALL}")
+                return False
+            print(f"  {Fore.YELLOW}[*] hCaptcha menampilkan '{target.strip()[:40]}' (hal {page_num}) — menekan refresh untuk challenge baru...{Style.RESET_ALL}")
+            _hcap_click_refresh(page)
+            time.sleep(2.5)
+            continue
+
+        # ── State verifikasi pasif (tombol 'Verify' tanpa try-again/tiles) ──
         if btn_text in ("verify", "verifizieren", "verificar", "vahvista") and not meta.get("hasTiles"):
+            print(f"  {Fore.CYAN}[*] hCaptcha in-page (hal {page_num}): state verifikasi pasif — menekan tombol Verify...{Style.RESET_ALL}")
             _hcap_click_submit(page)
-            time.sleep(1.5)
+            time.sleep(2.5)
             if not _find_hcaptcha_challenge_frame(page):
                 return True
+            # Frame masih terbuka — ulangi evaluasi state di iterasi berikutnya
+            # (jangan jatuh ke grid solving dengan prompt kosong).
+            continue
 
-        target = meta.get("target") or ""
         grid_dim = meta.get("gridDim") or 3
         mode = "drag" if meta.get("isDrag") else "click"
+
+        if mode == "drag":
+            # Drag puzzle (mis. "Drag the letter to the place where it fits"):
+            # gambar tunggal TANPA sel yang bisa diklik, jadi grid_pick tidak bisa
+            # menjawabnya dan drag buta hanya ditolak berulang. hCaptcha sendiri
+            # menyediakan tombol "Skip" — tekan lalu ambil challenge berikutnya
+            # (biasanya grid klik yang bisa diselesaikan vision consensus).
+            print(f"  {Fore.CYAN}[*] hCaptcha in-page (hal {page_num}): challenge drag terdeteksi{Style.RESET_ALL}")
+            if target:
+                print(f"  {Fore.LIGHTBLACK_EX}    target={target[:45]!r} — menekan Skip untuk challenge berikutnya{Style.RESET_ALL}")
+            _hcap_click_submit(page)   # tombol submit pada drag puzzle = "Skip"
+            time.sleep(2.0)
+            if not _find_hcaptcha_challenge_frame(page):
+                # Skip menutup challenge (jarang) — anggap selesai.
+                return True
+            continue
+
         b64 = _hcap_canvas_b64(page)
         if not b64:
+            print(f"  {Fore.LIGHTBLACK_EX}[diag] solve_in_page (hal {page_num}): gagal capture grid/canvas{Style.RESET_ALL}")
             break
-        cells = _sidecar_grid_pick(solver_url, b64, target, mode=mode, grid=grid_dim, timeout=45)
+        cells = _sidecar_grid_pick(solver_url, b64, target, mode="click", grid=grid_dim, timeout=120)
         print(f"  {Fore.CYAN}[*] hCaptcha in-page (hal {page_num}): target={target[:45]!r} (grid {grid_dim}x{grid_dim}) cells={cells}{Style.RESET_ALL}")
 
-        if mode == "drag" and len(cells) >= 2:
-            _hcap_drag_cells(page, cells[0], cells[1], grid=grid_dim)
-        elif cells:
+        if cells:
             _hcap_click_cells(page, cells, grid=grid_dim)
-        else:
-            # Tidak ada sel yang cocok atau ragu — klik baris pertama jika canvas drag
-            if mode == "drag":
-                _hcap_click_cells(page, list(range(grid_dim)), grid=grid_dim)
 
         time.sleep(1.0)
         clicked_txt = _hcap_click_submit(page)
@@ -1375,29 +1492,119 @@ def solve_hcaptcha_challenge_in_page(page, solver_url: str,
     fr = _find_hcaptcha_challenge_frame(page)
     if fr:
         meta = _hcap_meta(fr)
-        if (meta.get("buttonText") or "").lower() in ("verify", "verifizieren", "verificar", "next"):
+        if (meta.get("buttonText") or "").lower() in ("verify", "verifizieren", "verificar", "next", "skip"):
             _hcap_click_submit(page)
             time.sleep(2.0)
     return not bool(_find_hcaptcha_challenge_frame(page))
+
+
+def _hcap_checkout_confirmed(page) -> bool:
+    """True bila halaman sudah menampilkan konfirmasi checkout Decodo."""
+    try:
+        body = page.locator("body").inner_text()
+    except Exception:
+        return False
+    return ("Your purchase was successful" in body or "Begin proxy setup" in body)
+
+
+def _click_hcaptcha_checkbox(page, attempts: int = 4) -> bool:
+    """Klik checkbox 'I am human' hCaptcha yang ASLI di dalam frame-nya.
+
+    Enterprise hCaptcha (checkout Decodo) hanya menerbitkan token valid bila
+    checkbox & challenge diselesaikan di widget asli. Elemen click bisa diabaikan
+    saat ada overlay/spinner, jadi kita coba: (1) element click dengan hover,
+    (2) klik koordinat via page.mouse. Mengembalikan True bila sebuah klik terkirim.
+    """
+    for _ in range(attempts):
+        for f in page.frames:
+            u = (f.url or "")
+            if "hcaptcha" not in u or not ("checkbox" in u or "frame=checkbox" in u):
+                continue
+            for sel in ["#checkbox", "div#checkbox", "[role='checkbox']", "#anchor"]:
+                try:
+                    loc = f.locator(sel)
+                    if loc.count() == 0:
+                        continue
+                    el = loc.first
+                    if not el.is_visible():
+                        continue
+                    # (1) Klik humanized: page.mouse TER-PATCH humanize (kurva Bezier),
+                    # sedangkan Frame.locator().click() TIDAK — klik instan inilah yang
+                    # memicu deteksi 'Please try again' pada hCaptcha Enterprise.
+                    # Karena itu: jeda natural → gerak mouse berkelok di area widget →
+                    # gerak ke checkbox → klik.
+                    try:
+                        box = el.bounding_box()
+                        if box and box.get("width") and box.get("height"):
+                            cx = box["x"] + box["width"] / 2
+                            cy = box["y"] + box["height"] / 2
+                            # Jeda alami sebelum menyentuh widget (manusia butuh
+                            # waktu melihat modal dan mengarahkan kursor).
+                            time.sleep(random.uniform(0.8, 1.8))
+                            # Gerakan 'wander' kecil di sekitar widget dulu —
+                            # bukan lompatan lurus dari posisi kursor sebelumnya.
+                            try:
+                                wx = box["x"] + random.uniform(0.1, 0.9) * box["width"]
+                                wy = box["y"] - random.uniform(10, 40)
+                                page.mouse.move(wx, wy)
+                                time.sleep(random.uniform(0.2, 0.5))
+                            except Exception:
+                                pass
+                            # Klik dengan sedikit jitter di dalam kotak checkbox
+                            jx = cx + random.uniform(-2, 2)
+                            jy = cy + random.uniform(-2, 2)
+                            page.mouse.move(jx, jy)
+                            time.sleep(random.uniform(0.08, 0.25))
+                            page.mouse.click(jx, jy)
+                            return True
+                    except Exception:
+                        pass
+                    # (2) Fallback terakhir: element click (jarang dibutuhkan;
+                    # klik instan — mungkin ditolak hCaptcha, tapi tetap dicoba
+                    # agar ada interaksi bila mouse path gagal).
+                    try:
+                        el.hover(timeout=2000)
+                        time.sleep(random.uniform(0.15, 0.4))
+                        el.click(timeout=2500)
+                        return True
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+        time.sleep(1)
+    return False
+
+
+def _wait_for_hcaptcha_challenge(page, timeout: float = 12.0) -> bool:
+    """Tunggu frame challenge hCaptcha (#frame=challenge) muncul setelah klik checkbox."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _find_hcaptcha_challenge_frame(page):
+            return True
+        if _hcap_checkout_confirmed(page):
+            return False
+        time.sleep(0.5)
+    return bool(_find_hcaptcha_challenge_frame(page))
 
 
 def handle_hcaptcha_checkout_challenge(
     page,
     proxy_config: Dict[str, Any],
     solver_url: Optional[str] = None,
-    timeout: int = 75
+    timeout: int = 75,
+    headless: bool = False,
 ) -> bool:
     """
     Menangani modal hCaptcha ('One more step before you're done') pada checkout Decodo:
     1. Deteksi kemunculan modal hCaptcha secara responsif.
     2. Ekstrak sitekey dari frame URL atau DOM di semua level frame.
-    3. Hubungi sidecar captcha-solver (direct tanpa proxy).
-    4. Jika token didapat dari sidecar: injeksi token, dispatch postMessage/callback, dan tunggu konfirmasi (JANGAN klik checkbox lagi agar tidak memicu puzzle baru).
-    5. Jika token tidak tersedia: lakukan satu klik humanized pada checkbox 'I am human'.
-    6. Jika muncul puzzle visual: selesaikan OTOMATIS di dalam halaman asli (grid vision
-       sidecar + klik kanvas nyata, sehingga token di-mint oleh widget asli dan lolos
-       binding rqdata/sesi enterprise). Bila gagal, baru minta pengguna menyelesaikan manual.
-    7. Verifikasi konfirmasi sukses 'Your purchase was successful'.
+    3. Klik checkbox 'I am human' ASLI agar widget menerbitkan challenge (jalur utama).
+    4. Selesaikan challenge di dalam halaman asli (vision grid sidecar + klik nyata) sehingga
+       token di-mint oleh widget asli dan lolos binding rqdata/sesi enterprise Decodo.
+    5. Cadangan: bila jalur in-page gagal, minta token dari sidecar (sitekey non-enterprise)
+       dan injeksi ke halaman (tanpa menyentuh frame internal hCaptcha).
+    6. Pantau konfirmasi 'Your purchase was successful'; bila headful, beri kesempatan
+       manusia menyelesaikan sisa challenge. Selalu berhenti tepat waktu (timeout).
     """
     time.sleep(2)
 
@@ -1459,120 +1666,133 @@ def handle_hcaptcha_checkout_challenge(
         except Exception:
             pass
 
-    token_injected = False
+    # ── 3. SELESAIKAN DI HALAMAN ASLI (JALUR UTAMA) ──────────────────────
+    # Checkout Decodo memakai hCaptcha ENTERPRISE: token terikat pada `rqdata`
+    # bertanda tangan + sesi halaman. Token yang dicetak browser sidecar sendiri
+    # DITOLAK backend Decodo (modal menggantung di 'Processing' tanpa progres).
+    # Karena itu klik checkbox ASLI lalu selesaikan challenge di widget asli agar
+    # token di-mint oleh sesi yang benar (binding rqdata lolos).
+    print(f"  {Fore.CYAN}[*] Mengklik checkbox 'I am human' hCaptcha asli untuk memunculkan challenge...{Style.RESET_ALL}")
+    if not _click_hcaptcha_checkbox(page):
+        print(f"  {Fore.LIGHTBLACK_EX}Info: checkbox hCaptcha belum terdeteksi/terklik; melanjutkan ke jalur berikutnya.{Style.RESET_ALL}")
+    time.sleep(2)
+
+    if not _hcap_checkout_confirmed(page) and _wait_for_hcaptcha_challenge(page, timeout=12):
+        if target_solver and solve_hcaptcha_challenge_in_page(page, target_solver):
+            print(f"  {Fore.CYAN}[*] Challenge hCaptcha diselesaikan otomatis (in-page). Menunggu konfirmasi...{Style.RESET_ALL}")
+            for _ in range(20):
+                time.sleep(1)
+                if _hcap_checkout_confirmed(page):
+                    print(f"  {Fore.GREEN}✓ Konfirmasi checkout sukses setelah solve in-page!{Style.RESET_ALL}")
+                    return True
+                if not _find_hcaptcha_challenge_frame(page):
+                    break
+        else:
+            print(f"  {Fore.YELLOW}[!] Solver vision in-page belum menyelesaikan challenge; mencoba jalur cadangan.{Style.RESET_ALL}")
+
+    if _hcap_checkout_confirmed(page):
+        return True
+
+    # ── 4. CADANGAN: token dari browser sidecar (sitekey non-enterprise) ──
+    # Hanya dipakai bila jalur in-page gagal. TIDAK menginjeksi ke frame internal
+    # hCaptcha agar widget asli tidak rusak (menggantung di 'Processing').
     if target_solver and sitekey and check_sidecar_health(target_solver):
         try:
             _via = "via proxy" if hcaptcha_proxy_str else "direct"
-            print(f"  {Fore.CYAN}[*] Menghubungi captcha-solver sidecar ({target_solver}) untuk sitekey {sitekey[:8]} ({_via})...{Style.RESET_ALL}")
-            token = solve_hcaptcha_via_sidecar(target_solver, page.url, sitekey, proxy_str=hcaptcha_proxy_str)
-            if token and isinstance(token, str) and len(token) > 10:
-                print(f"  {Fore.GREEN}✓ Token hCaptcha didapat dari solver sidecar! Menginjeksi token & memvalidasi respons...{Style.RESET_ALL}")
-                inject_hcaptcha_token(page, token)
-                token_injected = True
-
-                # Coba submit / klik tombol save jika aktif
-                for btn_sel in ['button:has-text("Save")', 'button:has-text("Save payment information")', 'button[type="submit"]']:
-                    try:
-                        s_btn = page.locator(btn_sel)
-                        if s_btn.count() > 0 and s_btn.first.is_visible() and s_btn.first.is_enabled():
-                            s_btn.first.click(force=True)
-                            break
-                    except Exception:
-                        pass
-
-                # Tunggu konfirmasi apakah token langsung diterima backend (tanpa perlu klik checkbox)
-                for _ in range(8):
+            # Token hCaptcha Enterprise terikat rqdata sesi — satu token dari
+            # sidecar kadang lolos binding, kadang ditolak (run 16 lolos, 17/18
+            # ditolak). Karena itu minta hingga 3 token; setiap token diinjeksi
+            # ulang dengan klik Save & tunggu konfirmasi masing-masing.
+            for token_attempt in range(1, 4):
+                print(f"  {Fore.CYAN}[*] Cadangan #{token_attempt}/3: meminta token dari captcha-solver sidecar ({target_solver}) untuk sitekey {sitekey[:8]} ({_via})...{Style.RESET_ALL}")
+                token = solve_hcaptcha_via_sidecar(target_solver, page.url, sitekey, proxy_str=hcaptcha_proxy_str)
+                if not (token and isinstance(token, str) and len(token) > 10):
+                    print(f"  {Fore.YELLOW}[!] Token #{token_attempt} gagal diperoleh; mencoba lagi...{Style.RESET_ALL}")
+                    continue
+                print(f"  {Fore.GREEN}✓ Token hCaptcha #{token_attempt} dari sidecar diperoleh. Menginjeksi ke halaman...{Style.RESET_ALL}")
+                inject_hcaptcha_token(page, token, include_hcaptcha_frames=False)
+                # Backend Stripe perlu waktu memvalidasi token yang diinjeksi.
+                # Klik Save bisa terkirim terlalu cepat / butuh diulang; tunggu
+                # konfirmasi hingga 45 dtk dengan retry klik Save periodik.
+                clicked_any = False
+                for attempt in range(3):
+                    for btn_sel in ['button:has-text("Save")', 'button:has-text("Save payment information")', 'button[type="submit"]']:
+                        try:
+                            s_btn = page.locator(btn_sel)
+                            if s_btn.count() > 0 and s_btn.first.is_visible() and s_btn.first.is_enabled():
+                                s_btn.first.click(force=True)
+                                clicked_any = True
+                                break
+                        except Exception:
+                            pass
+                    if clicked_any:
+                        break
+                    time.sleep(2)
+                confirmed = False
+                for _ in range(45):
                     time.sleep(1)
-                    body_check = ""
-                    try:
-                        body_check = page.locator("body").inner_text()
-                    except Exception:
-                        pass
-                    if "Your purchase was successful" in body_check or "Begin proxy setup" in body_check:
-                        print(f"  {Fore.GREEN}✓ Konfirmasi checkout berhasil via token hCaptcha sidecar!{Style.RESET_ALL}")
-                        return True
+                    if _hcap_checkout_confirmed(page):
+                        confirmed = True
+                        break
+                    # Retry klik Save tiap ~9 dtk bila konfirmasi belum muncul
+                    # (klik pertama bisa terkirim sebelum token ter-binding).
+                    if _ % 9 == 8:
+                        for btn_sel in ['button:has-text("Save")', 'button:has-text("Save payment information")', 'button[type="submit"]']:
+                            try:
+                                s_btn = page.locator(btn_sel)
+                                if s_btn.count() > 0 and s_btn.first.is_visible() and s_btn.first.is_enabled():
+                                    s_btn.first.click(force=True)
+                                    break
+                            except Exception:
+                                pass
+                if confirmed:
+                    print(f"  {Fore.GREEN}✓ Konfirmasi checkout berhasil via token hCaptcha sidecar (#{token_attempt})!{Style.RESET_ALL}")
+                    return True
+                print(f"  {Fore.YELLOW}[!] Token #{token_attempt} belum diterima backend — kemungkinan ditolak binding enterprise. Token baru akan dicoba bila ada...{Style.RESET_ALL}")
         except Exception as e:
             print(f"  {Fore.LIGHTBLACK_EX}Info sidecar: {e}{Style.RESET_ALL}")
 
-    # 3. Fallback: klik checkbox 'I am human' di browser bila modal BELUM terkonfirmasi.
-    #    PENTING: jangan hanya bergantung pada `token_injected`. Sitekey Decodo bergaya
-    #    enterprise (butuh rqdata yang ditandatangani halaman), sehingga token yang dicetak
-    #    sidecar dari widget generik bisa DITOLAK backend -> modal menggantung tanpa fallback.
-    #    Jadi selalu klik checkbox asli sekali (natural) agar challenge bisa dilanjutkan
-    #    oleh solver vision / diselesaikan manusia di jendela headful.
-    body_check = ""
-    try:
-        body_check = page.locator("body").inner_text()
-    except Exception:
-        pass
-    if "Your purchase was successful" in body_check or "Begin proxy setup" in body_check:
-        return True
-
-    for f in page.frames:
-        if "hcaptcha.com" in (f.url or "") and ("checkbox" in (f.url or "") or "#frame=checkbox" in (f.url or "")):
-            try:
-                cb = f.locator('#checkbox, div#checkbox, [role="checkbox"], #anchor')
-                if cb.count() > 0 and cb.first.is_visible():
-                    print(f"  {Fore.CYAN}[*] Mengklik checkbox 'I am human' hCaptcha secara natural...{Style.RESET_ALL}")
-                    try:
-                        cb.first.hover(timeout=3000)
-                        time.sleep(0.3)
-                        cb.first.click(timeout=3000)
-                    except Exception:
-                        try:
-                            cb.first.click(force=True)
-                        except Exception:
-                            pass
-                    time.sleep(2)
-                    break
-            except Exception:
-                pass
-
-    # 4. Pantau penyelesaian checkout
+    # ── 5. PANTAU PENYELESAIAN CHECKOUT ──────────────────────────────────
+    # Loop menjaga: klik ulang checkbox bila widget reset, selesaikan challenge
+    # in-page bila muncul, dan beri kesempatan manusia saat headful. Berhenti
+    # tepat waktu (timeout) agar tidak menggantung tanpa batas.
     has_prompted_challenge = False
+    idle_ticks = 0
     deadline = time.time() + timeout
     while time.time() < deadline:
-        body_now = ""
-        try:
-            body_now = page.locator("body").inner_text()
-        except Exception:
-            pass
-        if "Your purchase was successful" in body_now or "Begin proxy setup" in body_now:
+        if _hcap_checkout_confirmed(page):
             print(f"  {Fore.GREEN}✓ Verifikasi checkout sukses ('Your purchase was successful')!{Style.RESET_ALL}")
             return True
 
-        # Deteksi apakah hCaptcha menampilkan puzzle gambar visual
-        has_challenge = any("frame=challenge" in (f.url or "") for f in page.frames)
-        if has_challenge:
-            solved_inpage = False
-            # Coba selesaikan OTOMATIS di dalam halaman asli (token di-mint widget asli,
-            # sehingga lolos binding rqdata/sesi enterprise). Jika gagal, baru minta manusia.
+        if _find_hcaptcha_challenge_frame(page):
+            idle_ticks = 0
             if target_solver and solve_hcaptcha_challenge_in_page(page, target_solver):
                 print(f"  {Fore.CYAN}[*] Puzzle hCaptcha diselesaikan otomatis (in-page). Menunggu konfirmasi...{Style.RESET_ALL}")
                 for _ in range(20):
                     time.sleep(1)
-                    chk = ""
-                    try:
-                        chk = page.locator("body").inner_text()
-                    except Exception:
-                        pass
-                    if "Your purchase was successful" in chk or "Begin proxy setup" in chk:
+                    if _hcap_checkout_confirmed(page):
                         print(f"  {Fore.GREEN}✓ Konfirmasi checkout sukses setelah solve in-page!{Style.RESET_ALL}")
                         return True
-                    if not any("frame=challenge" in (f.url or "") for f in page.frames):
-                        solved_inpage = True
+                    if not _find_hcaptcha_challenge_frame(page):
                         break
-
-            if not solved_inpage and not has_prompted_challenge:
+            elif not has_prompted_challenge:
                 has_prompted_challenge = True
                 print(f"\n  {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}")
                 print(f"  {Fore.YELLOW}{Style.BRIGHT}⚠️ HCAPTCHA CHALLENGE TERDETEKSI DI BROWSER!{Style.RESET_ALL}")
-                print(f"  {Fore.CYAN}👉 Silakan selesaikan puzzle gambar hCaptcha di jendela browser yang terbuka.{Style.RESET_ALL}")
+                print(f"  {Fore.CYAN}👉 Silakan selesaikan challenge hCaptcha (checkbox/puzzle gambar) di jendela browser yang terbuka.{Style.RESET_ALL}")
                 print(f"  {Fore.CYAN}   Bot akan otomatis mendeteksi konfirmasi pembelian saat Anda selesai.{Style.RESET_ALL}")
                 print(f"  {Fore.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Style.RESET_ALL}\n")
+        else:
+            # Tidak ada challenge & belum terkonfirmasi: pastikan checkbox terklik
+            # (widget kadang reset ke keadaan unchecked). Batasi frekuensi agar tidak spam.
+            idle_ticks += 1
+            if idle_ticks % 4 == 0:
+                _click_hcaptcha_checkbox(page, attempts=1)
 
         time.sleep(1)
 
+    if not headless:
+        print(f"  {Fore.YELLOW}[!] Waktu tunggu hCaptcha checkout habis. Bila challenge masih tampil, selesaikan manual di jendela browser.{Style.RESET_ALL}")
     return False
 
 
@@ -2930,7 +3150,7 @@ def hunt_single_decodo(
                     # Headful: beri waktu lebih panjang agar manusia/vision solver bisa
                     # menyelesaikan puzzle setelah checkbox fallback memunculkannya.
                     _hcap_timeout = 180 if not headless else 75
-                    hcap_ok = handle_hcaptcha_checkout_challenge(page, proxy_config, timeout=_hcap_timeout)
+                    hcap_ok = handle_hcaptcha_checkout_challenge(page, proxy_config, timeout=_hcap_timeout, headless=headless)
 
                     # 5. Cek konfirmasi sukses ('Your purchase was successful') & klik 'Begin proxy setup'
                     time.sleep(2)
@@ -3023,7 +3243,10 @@ def run_decodo_hunter(
     all_gathered_proxies = []
     successful_accounts = 0
 
-    proxy_index = 0
+    # Acak titik awal rotasi proxy agar run berbeda tidak selalu memakai proxy
+    # pertama — IP yang sama berulang kali membuat pendaftaran akan ditandai
+    # hCaptcha (state 'Silakan coba lagi' permanen).
+    proxy_index = random.randrange(len(proxy_pool)) if proxy_pool else 0
 
     for i in range(1, total + 1):
         # Auto-failover rotasi proxy jika proxy timeout / terblokir Cloudflare
