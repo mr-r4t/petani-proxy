@@ -136,8 +136,21 @@ def resolve_location(
         cached = dict(_IP_GEO_CACHE.get(target_ip, {})) if target_ip else {}
 
     c_code = (loc_code or cached.get("country_code") or default.get("country_code") or "??").upper()
-    c_name = cached.get("country") or COUNTRY_MAP.get(c_code) or default.get("country") or "Unknown"
-    city = cached.get("city") or CF_COLO_CITIES.get((colo_code or "").upper()) or default.get("city") or "-"
+
+    if loc_code:
+        # loc_code = negara egress ASLI dari Cloudflare trace — prioritas tertinggi.
+        # Jangan pakai nama negara/kota dari cache GeoIP host: pada proxy backconnect
+        # (mis. Decodo), host gateway bisa berbeda negara dari IP keluar (egress).
+        c_name = COUNTRY_MAP.get(loc_code) or cached.get("country") or default.get("country") or "Unknown"
+        city = (
+            (cached.get("city") if cached.get("country_code") == loc_code else None)
+            or CF_COLO_CITIES.get((colo_code or "").upper())
+            or (default.get("city") if default.get("country_code") == loc_code else None)
+            or "-"
+        )
+    else:
+        c_name = cached.get("country") or COUNTRY_MAP.get(c_code) or default.get("country") or "Unknown"
+        city = cached.get("city") or CF_COLO_CITIES.get((colo_code or "").upper()) or default.get("city") or "-"
 
     if json_data:
         c_code = str(json_data.get("country_code") or json_data.get("countryCode") or c_code).upper()
@@ -324,6 +337,15 @@ def probe_single_proxy(
                 proxy_item["country_code"] = geo["country_code"]
                 proxy_item["city"] = geo["city"]
 
+                # Lokasi versi GeoIP DB (ipwho.is) untuk perbandingan — bisa
+                # berbeda dari Cloudflare trace (contoh kasus ProxyScrape premium).
+                # Query DB langsung agar tidak terkontaminasi field country versi
+                # Cloudflare yang barusan menimpa proxy_item di atas.
+                host_geo = lookup_ip_geoip(str(proxy_item["ip"])) if proxy_item.get("ip") else {}
+                geoip_code = host_geo.get("country_code") or "??"
+                geoip_country = host_geo.get("country") or "Unknown"
+                geoip_city = host_geo.get("city") or "-"
+
                 return {
                     "alive": True,
                     "status_code": resp.status_code,
@@ -333,6 +355,8 @@ def probe_single_proxy(
                     "country_code": geo["country_code"],
                     "city": geo["city"],
                     "location_str": geo["location_str"],
+                    "geoip_location_str": f"[{geoip_code}] {geoip_country} ({geoip_city})",
+                    "geoip_country": geoip_country,
                     "error": None,
                     "proxy": proxy_item
                 }
@@ -347,6 +371,7 @@ def probe_single_proxy(
                     "country_code": geo["country_code"],
                     "city": geo["city"],
                     "location_str": geo["location_str"],
+                    "geoip_location_str": geo["location_str"],
                     "error": f"HTTP {resp.status_code}",
                     "proxy": proxy_item
                 }
@@ -371,6 +396,7 @@ def probe_single_proxy(
                 "country_code": geo["country_code"],
                 "city": geo["city"],
                 "location_str": geo["location_str"],
+                "geoip_location_str": geo["location_str"],
                 "error": err_clean,
                 "proxy": proxy_item
             }
@@ -410,6 +436,13 @@ def probe_single_proxy(
                 proxy_item["country_code"] = geo["country_code"]
                 proxy_item["city"] = geo["city"]
 
+                # Lokasi versi GeoIP DB (ipwho.is) untuk perbandingan — query DB
+                # langsung agar tidak terkontaminasi data Cloudflare.
+                host_geo = lookup_ip_geoip(str(proxy_item["ip"])) if proxy_item.get("ip") else {}
+                geoip_code = host_geo.get("country_code") or "??"
+                geoip_country = host_geo.get("country") or "Unknown"
+                geoip_city = host_geo.get("city") or "-"
+
                 return {
                     "alive": True,
                     "status_code": resp.status,
@@ -419,6 +452,8 @@ def probe_single_proxy(
                     "country_code": geo["country_code"],
                     "city": geo["city"],
                     "location_str": geo["location_str"],
+                    "geoip_location_str": f"[{geoip_code}] {geoip_country} ({geoip_city})",
+                    "geoip_country": geoip_country,
                     "error": None,
                     "proxy": proxy_item
                 }
@@ -433,6 +468,7 @@ def probe_single_proxy(
                     "country_code": geo["country_code"],
                     "city": geo["city"],
                     "location_str": geo["location_str"],
+                    "geoip_location_str": geo["location_str"],
                     "error": f"HTTP {resp.status}",
                     "proxy": proxy_item
                 }
@@ -457,6 +493,7 @@ def probe_single_proxy(
             "country_code": geo["country_code"],
             "city": geo["city"],
             "location_str": geo["location_str"],
+            "geoip_location_str": geo["location_str"],
             "error": err_clean,
             "proxy": proxy_item
         }
@@ -481,7 +518,8 @@ def check_file_health(
             "dead": [],
             "duration_sec": 0.0,
             "avg_latency_ms": 0,
-            "country_distribution": {}
+            "country_distribution": {},
+            "country_distribution_geoip": {}
         }
 
     alive_results = []
@@ -492,7 +530,7 @@ def check_file_health(
     completed_count = 0
 
     # Pre-warm GeoIP cache asynchronously so locations resolve fast for all nodes
-    unique_ips = list({p["ip"] for p in proxies if p.get("ip")})[:60]
+    unique_ips = list({p["ip"] for p in proxies if p.get("ip")})
     if unique_ips:
         def prewarm():
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(unique_ips))) as ex:
@@ -531,6 +569,11 @@ def check_file_health(
 
     import collections
     country_counts = collections.Counter(r["country"] for r in alive_results if r.get("country") and r["country"] != "Unknown")
+    geoip_counts = collections.Counter(
+        r.get("geoip_country")
+        for r in alive_results
+        if r.get("geoip_country") and r["geoip_country"] != "Unknown"
+    )
 
     return {
         "file_path": file_path,
@@ -539,7 +582,8 @@ def check_file_health(
         "dead": dead_results,
         "duration_sec": duration,
         "avg_latency_ms": avg_latency,
-        "country_distribution": dict(country_counts.most_common(10))
+        "country_distribution": dict(country_counts.most_common()),
+        "country_distribution_geoip": dict(geoip_counts.most_common())
     }
 
 
